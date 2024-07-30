@@ -1,0 +1,2532 @@
+---
+title: "PNA_Clamp_Optimisation_Script"
+author: "Usman_Hussain"
+date: "2024-07-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#creating paths to files
+``` {r}
+# Path to the raw sequences
+path <- "D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Raw_sequences"
+# Path to metadata
+paf_metadata <- "D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Metadata"
+# Path of the output
+output<- "D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Processed_Sequences"
+```
+
+#Loading all packages used in this script
+```{r}
+library(tidyr)
+library(dada2)
+library(ShortRead)
+library("seqinr")
+library(ggplot2)
+library(data.table)
+library(dplyr)
+library(microbiome)
+library(vegan)
+library(tidyverse)
+library(phyloseq)
+library(viridis)
+library(RColorBrewer)
+library(magrittr)
+library(gridExtra)
+library(msa)
+library(R.utils)
+library(brms)
+library(microViz)
+```
+
+
+#Loading sequencing metadata from CSV file
+```{r}
+#Loading metadata for PNA clamp experiment
+Sample_names_primers <- read.csv("D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Metadata\\Sample_name_and_primers.csv")
+
+
+#Loading metadata of all unused primer tag combinations (will be used for correcting tag jumping later)
+Jim_metadata <- read.csv("D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Metadata\\Jim_Metadata.csv")
+
+
+
+#Making Sample_Name as the forward and reverse primers for all the unused combinations, except for the used combinations - to ease data manipulation
+Jim_metadata <- mutate(Jim_metadata,
+                    Sample_Name = ifelse(is.na(Sample_Name), 
+                                         paste0(Forward_Primer, "_", Reverse_Primer), #Looks for NA, and if it's NA paste F and R primer in name, otherwise print the name
+                                         Sample_Name))
+```
+
+#code to demultiplex samples 
+Demultiplexing was done via Supercomputing Wales (SCW) using cutadapt
+```{r}
+##!/bin/bash
+##SBATCH -o cutadapt.demultiplex.16S.primer.o.%J
+##SBATCH -e cutadapt.demultiplex.16S.primer.e.%J
+##SBATCH -J cutadapt_demultiplex_16S_big_PNA_experiment
+##SBATCH --ntasks=1
+##SBATCH --ntasks-per-node=1
+##SBATCH -p compute
+##SBATCH --time=0-30:00
+##SBATCH --exclusive
+#
+### Usage
+## sbatch script # submit job
+## squeue        # job status
+#
+##module purge
+### Load hpcw modules
+##module load hpcw
+## Load blast module
+#module load cutadapt
+#
+## Settings & directory locations
+#export input_dir=/home/b.smh18qbl/Big_PNA_Experiment/
+#
+#
+#NNODES=$SLURM_NNODES
+#NCPUS=$SLURM_NTASKS
+#PPN=$SLURM_NTASKS_PER_NODE
+#
+## Make a directory for this job on /scratch
+#export experiment_dir=/home/$USER/Big_PNA_Experiment/cutadapt_demul_16S_primers-${SLURM_JOBID}
+#mkdir -p $experiment_dir
+#
+#echo Running on host `hostname`
+#echo Time is `date`
+#echo Directory is `pwd`
+#echo SLURM job ID is $SLURM_JOBID
+#echo This jobs runs on the following machine: `echo $SLURM_JOB_NODELIST | uniq`
+#
+#echo Number of Processing Elements is $NCPUS
+#echo Number of mpiprocs per node is $PPN
+#
+#cd /home/b.smh18qbl/Big_PNA_Experiment
+#
+#start="$(date +%s)"
+#
+##Note - Forward primer is in 1 and reverse primer is in 2
+#
+#cutadapt \
+#-e 0.15 --no-indels \
+#-g file:/nfshome/store02/users/b.smh18qbl/Big_PNA_Experiment/tag_spacers_fwd_16S.fasta \
+#-G file:/nfshome/store02/users/b.smh18qbl/Big_PNA_Experiment/tag_spacers_rev_16S.fasta \
+#-o {name1}-{name2}.R1.fastq.gz -p {name1}-{name2}.R2.fastq.gz \
+#/home/b.smh18qbl/Big_PNA_Experiment/PNA_USMAN_FKDN230123809-1A_HWCTNDRX2_L2_1.fq.gz  #/home/b.smh18qbl/Big_PNA_Experiment/PNA_USMAN_FKDN230123809-1A_HWCTNDRX2_L2_2.fq.gz \
+#
+#stop="$(date +%s)"
+#finish=$(( $stop-$start ))
+#echo BLAST $SLURM_JOBID Job-Time $finish seconds
+#echo BLAST End Time is `date`
+```
+
+
+#Creating document for changing raw sequence file names from demultiplexed samples to simplify file names. I.E F9_16S-R1_16S.R1.fastq.gz to F9_R10.R1.fastq.gz
+```{r}
+
+# Create the text for R1 files
+text_R1 <- ifelse(grepl("\\.R1\\.fastq\\.gz$", Jim_metadata$File_Names),
+                  paste0(Jim_metadata$File_Names, " ", ifelse(grepl("\\.R1\\.fastq\\.gz$", Jim_metadata$Sample_Name),
+                                                               Jim_metadata$Sample_Name,
+                                                               paste0(Jim_metadata$Sample_Name, ".R1.fastq.gz"))),
+                  Jim_metadata$File_Names)
+
+# Filter out the lines with R2 files
+text_R1 <- text_R1[!grepl("\\.R2\\.fastq\\.gz$", text_R1)]
+
+# Print the resulting strings for R1 files without R2 lines
+print(text_R1)
+
+
+# Create the text for R2 files
+text_R2 <- ifelse(grepl("\\.R2\\.fastq\\.gz$", Jim_metadata$File_Names),
+                  paste0(Jim_metadata$File_Names, " ", ifelse(grepl("\\.R2\\.fastq\\.gz$", Jim_metadata$Sample_Name),
+                                                               Jim_metadata$Sample_Name,
+                                                               paste0(Jim_metadata$Sample_Name, ".R2.fastq.gz"))),
+                  Jim_metadata$File_Names)
+
+# Filter out the lines with R1 files
+text_R2 <- text_R2[!grepl("\\.R1\\.fastq\\.gz$", text_R2)]
+
+# Print the resulting strings for R2 files without R1 lines
+print(text_R2)
+
+# Write R1 data to a file
+writeLines(text_R1, "rename_index_local_16S_R1.txt")
+
+# Write R2 data to a file (appending to the previously created file)
+writeLines(text_R2, "rename_index_local_16S_R2.txt")
+
+```
+
+#Code in ubuntu to rename the file names to the simplifed file names
+```{R}
+#cd ~/E/Documents/PhD_Bioinformatics/My_Nano_Run/Data/Metadata/16S_sequences
+
+# mmv < rename_index_local_16S_R1.txt # the mmv command is used to rename the files in the directory by matching the names in the text file and renaming
+
+# mmv < rename_index_local_16S_R2.txt
+```
+
+#Adding all the forward reads to fqR1 and all the reverse reads to fqR2
+```{r}
+fqR1 <- list.files(file.path(path, "16S_Sequences_with_unused_tags"), pattern = "R1.fastq.gz", full.names = T)
+
+fqR2 <- list.files(file.path(path, "16S_Sequences_with_unused_tags"), pattern = "R2.fastq.gz", full.names = T)
+
+```
+
+#Filtering sequences with ambiguous reads
+```{r}
+#Filter sequences with ambiguous reads
+
+
+#storing forward and reverse reads into fqR2.filtN and fqR1.filtN respectively
+fqR1.filtN <- paste(output,"/filtN_16S/", basename(fqR1), sep="")
+fqR2.filtN <- paste(output,"/filtN_16S/", basename(fqR2), sep="")
+
+#Removes sequences which contain ambiguous reads - the filterAndTrim  function filters and trims fastq files, and output fastq files containing those filtered and trimmed reads # Ambiguous nucleotides are shown in sequences as N, instead of ATCG
+removeNs <-filterAndTrim(fqR1, fqR1.filtN, fqR2, fqR2.filtN, maxN = 0, multithread = TRUE)  
+
+colnames(removeNs) <- c("raw","no.Ns")
+write.table(removeNs, file.path(output,"stat_count_Nfilter_16S.txt")) 
+
+fqR1.filtN <- list.files(paste0(output,"/filtN_16S/"), pattern="R1.fastq.gz",full.names = T)
+fqR2.filtN <- list.files(paste0(output,"/filtN_16S/"), pattern="R2.fastq.gz", full.names = T)
+
+```
+
+#Looking for primers
+```{r}
+# Identify the primers sequences, in 5'-3' orientation
+FWD <- "GTGBCAGCMGCCGCGGTAA" #Add the forward primer into FWD
+REV <- "GGACTACHVGGGTWTCTAAT" #Add the reverse primer into REV
+
+# Function to reorient the primers
+allOrients <- function(primer) {
+  # Create all orientations of the input sequence (Forward, complement, reverse and reverse complement)
+  require(Biostrings)
+  dna <- DNAString(primer)  # The Biostrings works w/ DNAString objects rather than character vectors
+  orients <- c(Forward = dna, Complement = complement(dna), Reverse = reverse(dna),
+               RevComp = reverseComplement(dna))
+  return(sapply(orients, toString))  # Convert back to character vector
+}
+
+FWD.orients <- allOrients(FWD)
+REV.orients <- allOrients(REV)
+
+primerHits <- function(primer, fn) {
+  # Counts number of reads in which the primer is found
+  nhits <- vcountPattern(primer, sread(readFastq(fn)), fixed = FALSE)
+  return(sum(nhits > 0))
+}
+
+# Count the occurrences of the primers sequences in a random sample
+sample_to_check<- sample(1:length(fqR1.filtN),size = 1)
+
+primer.check<-rbind(
+  FWD.R1 = sapply(FWD.orients, primerHits, fn = fqR1.filtN[sample_to_check]),
+  FWD.R2 = sapply(FWD.orients, primerHits, fn = fqR2.filtN[sample_to_check]),
+  REV.R1 = sapply(REV.orients, primerHits, fn = fqR1.filtN[sample_to_check]),
+  REV.R2 = sapply(REV.orients, primerHits, fn = fqR2.filtN[sample_to_check])
+)
+write.table(primer.check, file.path(output, "primer.check.16S.txt"))
+
+primer.check
+```
+
+#Cutadapt to remove primers
+```{r}
+cutadapt <- "C:\\Users\\Usman Hussain\\AppData\\Local\\Programs\\Python\\Python310\\Scripts\\cutadapt.exe"
+path.cut <- file.path(output, "filtN_16S/no_primers")
+
+if(!dir.exists(path.cut)) dir.create(path.cut) #If the directory exists go to it, if not create the directory
+fqR1.cut <- file.path(path.cut, basename(fqR1.filtN))
+fqR2.cut <- file.path(path.cut, basename(fqR2.filtN))
+
+FWD.RC <- dada2:::rc(FWD)
+REV.RC <- dada2:::rc(REV)
+# Trim the forward  of FWD off of R1
+R1.flags <- paste("-g", FWD, "-a", REV)
+# Trim the forward of REV off of R2
+R2.flags <- paste("-G", REV, "-A", FWD)
+
+
+# Run Cutadapt
+for(i in seq_along(fqR1)) {
+  system2(cutadapt, args = c(R1.flags, R2.flags, "-n", 2, # -n 2 required to remove FWD and REV from reads
+                             "-o", fqR1.cut[i], "-p", fqR2.cut[i], # output files
+                             fqR1.filtN[i], fqR2.filtN[i])) # input files
+}
+
+primer.check.cutadapt <- rbind(
+  FWD.R1 = sapply(FWD.orients, primerHits, fn = fqR1.cut[sample_to_check]),
+  FWD.R2 = sapply(FWD.orients, primerHits, fn = fqR2.cut[sample_to_check]),
+  REV.R1 = sapply(REV.orients, primerHits, fn = fqR1.cut[sample_to_check]),
+  REV.R2 = sapply(REV.orients, primerHits, fn = fqR2.cut[sample_to_check]) 
+)
+
+write.table(primer.check.cutadapt, file.path(output, "primer.check.cutadapt.16S.txt"))
+
+read.table(file.path(output, "primer.check.cutadapt.16S.txt"))
+```
+
+#Second filtering stage
+```{r}
+#Filtering
+
+# In this second step of filtering, we remove :
+# reads with more than 2 expected errors, based on quality scores,
+# reads of less than 75 nucleotides,
+# reads that match against the phiX genome (bacteriophage),
+# and truncate reads at the first instance of a quality score less than or equal to 2.
+
+#Creating file path for filtered sequences
+filtR1 <- file.path(path.cut, "filtered", basename(fqR1.cut))
+filtR2 <- file.path(path.cut, "filtered", basename(fqR2.cut))
+
+#Filter the sequences
+out <- filterAndTrim(fqR1.cut, filtR1, fqR2.cut, filtR2, 
+                     maxN = 0,  
+                     maxEE = c(2, 2),
+                     truncQ = 2, 
+                     minLen = 75, 
+                     rm.phix = TRUE, 
+                     compress = TRUE, multithread = TRUE)
+
+# Matrix with cutadapted sequences number and quality filter
+colnames(out) <- c("cutadapt","quality")
+write.table(out, file.path(output, "stat_count_cutadapt_qualfilt_16S.txt"))
+
+filtR1 <- list.files(paste0(path.cut, "/filtered"), pattern="R1.fastq", full.names=TRUE)
+filtR2 <- list.files(paste0(path.cut, "/filtered"), pattern="R2.fastq", full.names=TRUE)
+
+sample.names <- gsub(".*/filtered/(.*).R1.fastq.gz","\\1",filtR1)
+names(filtR1) <- sample.names
+names(filtR2) <- sample.names
+```
+
+#Learning error rate for generating ASVs
+```{r}
+require(doParallel,quietly = T)
+no_cores <- detectCores()-1
+cl <- makeCluster(no_cores)
+registerDoParallel(cl)
+
+#This chunk is for the reverse reads 
+errR1 <- learnErrors(filtR1, multithread=no_cores) #Uses bases in the reads from your samples to learn the error rate
+saveRDS(errR1, file.path(output,"errR1_16S.RDS")) #saves error rate into a new R project
+plot_errR1 <- plotErrors(errR1, nominalQ=TRUE) #plots the error rates in a graph
+ggplot2::ggsave(file.path(output,"plot_errR1_16S.png"),plot_errR1, width = 8, height = 6, dpi = 300)# saves the graphs using ggplot2 and customises the graph
+
+#This chuck is for the forward reads
+errR2 <- learnErrors(filtR2, multithread=no_cores) 
+saveRDS(errR2, file.path(output,"errR2_16S.RDS"))
+plot_errR2 <-plotErrors(errR2, nominalQ=TRUE)
+ggplot2::ggsave(file.path(output,"plot_errR2_16S.png"),plot_errR2, width = 8, height = 6, dpi = 300)
+```
+
+#Applying the sample inference algorithm with the error rate generated
+```{r}
+#We are now ready to apply the core sample inference algorithm (the error rate we calculated from the previous chunk of code) to the filtered and trimmed sequence data.
+
+# FORWARD reads
+dadaR1 <- dada(filtR1, err=errR1, multithread=TRUE)
+saveRDS(dadaR1, file = file.path(output,"dadaR1_16S.RDS"), compress = "gzip")
+
+# REVERSE reads
+dadaR2 <- dada(filtR2, err=errR2, multithread=TRUE)
+saveRDS(dadaR2, file = file.path(output,"dadaR2_16S.RDS"), compress = "gzip")
+```
+
+#Merging forward and reverse reads
+```{r}
+#Merge paired reads
+mergers <- mergePairs(dadaR1, filtR1, dadaR2, filtR2, verbose=TRUE)
+saveRDS(mergers, file = file.path(output,"mergers_16S.RDS"), compress = "gzip")
+
+# Inspect the merger data.frame from the first sample
+head(mergers[[1]])
+```
+
+# Filter sequences based on length (>225 and <275)
+```{r}
+seqtab.noShort <- seqtab[, nchar(colnames(seqtab)) > 225 & nchar(colnames(seqtab)) < 275]
+
+saveRDS(seqtab.noShort, file.path(output, "seqtab_noShort_16S.RDS"), compress = "gzip")
+```
+
+#Removing chimeras
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab.noShort, method="consensus", multithread=no_cores, verbose=TRUE)
+
+saveRDS(seqtab.nochim, file.path(output,"seqtab_nochim_16S.RDS"),compress="gzip")
+```
+
+#Collapsing ASVs
+```{r}
+#Collapse ASVs
+seqtab.coll <- collapseNoMismatch(seqtab.nochim, verbose=TRUE)
+
+saveRDS(seqtab.coll, file.path(output,"seqtab_nochim_coll_16S.RDS"),compress="gzip")
+```
+
+#Assigning taxonomy
+```{r}
+seqtab.coll <- readRDS(file.path(output,"seqtab_nochim_coll_16S.RDS"))
+
+# To the genus level:
+taxa <- assignTaxonomy(seqs = seqtab.coll,
+                       refFasta = "D:\\PhD_Bioinformatics\\Silva_database\\silva_nr99_v138.1_train_set.fa.gz",
+                       multithread=TRUE, verbose = T, tryRC = T, minBoot = 80, 
+                       outputBootstraps = T)
+saveRDS(taxa, file.path(output,"assignment_16S_SILVA_genus.RDS"), compress=T)
+
+apply(taxa$tax, 2, function(x) sum(is.na(x))) # Check number of unassigned ASV
+
+
+# At the species rank
+chunk.size <- 1000
+tax_dada_sp <- do.call(rbind,
+                       lapply(split(c(1:nrow(taxa$tax)), sort(c(1:nrow(taxa$tax))%%ceiling(nrow(taxa$tax)/chunk.size))),
+                              function(x){
+                                return(addSpecies(taxa$tax[x, ], 
+                                                  refFasta = "D:\\PhD_Bioinformatics\\Silva_database\\silva_species_assignment_v138.1.fa.gz", 
+                                                  tryRC = TRUE))
+                              }))
+
+saveRDS(tax_dada_sp, file.path(output, "assignment_16S_SILVA_species.RDS"), compress=T)
+apply(tax_dada_sp, 2, function(x) sum(is.na(x)))
+
+```
+
+
+#Calculating the number of reads lossed through filtering of the forward and merged reads
+```{r}
+#Check the number of total reads from my raw data: 
+# Path to your fastq.gz file
+fastq_file <- "D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Raw_sequences\\PNA_USMAN_FKDN230123809-1A_HWCTNDRX2_L2_1.fq.gz"
+
+# Count the number of sequences
+num_sequences <- countFastq(fastq_file)
+
+# Print the total number of sequences
+print(num_sequences)
+
+#Number of sequences for forward reads = 22260012
+
+
+
+########## Number of reads after demultiplexing
+
+# Specify the directory containing the .fq.gz files
+dir_path <- "D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Raw_Sequences\\16S_Sequences_with_unused_tags"
+
+# Get a list of all .fastq.gz files in the directory that end with R1.fastq.gz
+files <- list.files(path = dir_path, pattern = "R1\\.fastq.gz$", full.names = TRUE)
+
+# Initialize total line counter
+total_line_count <- 0
+
+# Loop through each file and count the lines
+for (file_path in files) {
+  # Open the compressed file
+  con <- gzfile(file_path, "r")
+  
+  # Initialize line counter for the current file
+  line_count <- 0
+  
+  # Read the file line by line and count lines
+  while (length(line <- readLines(con, n = 1000)) > 0) {
+    line_count <- line_count + length(line)
+  }
+  
+  # Close the connection
+  close(con)
+  
+  # Add the line count of the current file to the total line count
+  total_line_count <- total_line_count + line_count
+  
+  # Print the line count for the current file (optional)
+  cat("File:", file_path, "has", line_count, "lines\n")
+}
+
+# Print the total number of lines across all files
+cat("Total number of lines across all files:", total_line_count, "\n")
+
+No_of_reads <- total_line_count / 4
+
+# Print the total number of reads across all files
+cat("Total number of reads:", No_of_reads, "\n")
+
+# Total number of reads: 13813935 
+
+
+
+########## Number of reads after filtering for ambiguous nucleotides
+
+# Specify the directory containing the .fq.gz files
+dir_path <- "D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Processed_Sequences\\filtN_16S"
+
+# Get a list of all .fq.gz files in the directory
+files <- list.files(path = dir_path, pattern = "R1\\.fastq.gz$", full.names = TRUE)
+
+# Initialize total line counter
+total_line_count <- 0
+
+# Loop through each file and count the lines
+for (file_path in files) {
+  # Open the compressed file
+  con <- gzfile(file_path, "r")
+  
+  # Initialize line counter for the current file
+  line_count <- 0
+  
+  # Read the file line by line and count lines
+  while (length(line <- readLines(con, n = 1000)) > 0) {
+    line_count <- line_count + length(line)
+  }
+  
+  # Close the connection
+  close(con)
+  
+  # Add the line count of the current file to the total line count
+  total_line_count <- total_line_count + line_count
+  
+  # Print the line count for the current file (optional)
+  cat("File:", file_path, "has", line_count, "lines\n")
+}
+
+# Print the total number of lines across all files
+cat("Total number of lines across all files:", total_line_count, "\n")
+
+No_of_reads <- total_line_count/4
+
+# Print the total number of reads across all files
+cat("Total number of reads:", No_of_reads, "\n")
+
+# Total number of reads: 13803895 
+
+
+
+########## Number of reads after removing primers
+
+# Specify the directory containing the .fq.gz files
+dir_path <- "D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Processed_Sequences\\filtN_16S\\no_primers"
+
+# Get a list of all .fq.gz files in the directory
+files <- list.files(path = dir_path, pattern = "R1\\.fastq.gz$", full.names = TRUE)
+
+# Initialize total line counter
+total_line_count <- 0
+
+# Loop through each file and count the lines
+for (file_path in files) {
+  # Open the compressed file
+  con <- gzfile(file_path, "r")
+  
+  # Initialize line counter for the current file
+  line_count <- 0
+  
+  # Read the file line by line and count lines
+  while (length(line <- readLines(con, n = 1000)) > 0) {
+    line_count <- line_count + length(line)
+  }
+  
+  # Close the connection
+  close(con)
+  
+  # Add the line count of the current file to the total line count
+  total_line_count <- total_line_count + line_count
+  
+  # Print the line count for the current file (optional)
+  cat("File:", file_path, "has", line_count, "lines\n")
+}
+
+# Print the total number of lines across all files
+cat("Total number of lines across all files:", total_line_count, "\n")
+
+No_of_reads <- total_line_count/4
+
+# Print the total number of reads across all files
+cat("Total number of reads:", No_of_reads, "\n")
+
+# Total number of reads: 13803895 
+
+
+
+
+########## Number of reads after the second filtering stage
+
+# Specify the directory containing the .fq.gz files
+dir_path <- "D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Processed_Sequences\\filtN_16S\\no_primers\\filtered"
+
+# Get a list of all .fq.gz files in the directory
+files <- list.files(path = dir_path, pattern = "R1\\.fastq.gz$", full.names = TRUE)
+
+# Initialize total line counter
+total_line_count <- 0
+
+# Loop through each file and count the lines
+for (file_path in files) {
+  # Open the compressed file
+  con <- gzfile(file_path, "r")
+  
+  # Initialize line counter for the current file
+  line_count <- 0
+  
+  # Read the file line by line and count lines
+  while (length(line <- readLines(con, n = 1000)) > 0) {
+    line_count <- line_count + length(line)
+  }
+  
+  # Close the connection
+  close(con)
+  
+  # Add the line count of the current file to the total line count
+  total_line_count <- total_line_count + line_count
+  
+  # Print the line count for the current file (optional)
+  cat("File:", file_path, "has", line_count, "lines\n")
+}
+
+# Print the total number of lines across all files
+cat("Total number of lines across all files:", total_line_count, "\n")
+
+No_of_reads <- total_line_count/4
+
+# Print the total number of reads across all files
+cat("Total number of reads:", No_of_reads, "\n")
+
+#Total number of reads: 7701466 
+
+
+
+
+########## The number of reads after applying sample inference algorithm
+
+getN <- function(x) sum(getUniques(x))
+
+dadaR1_reads <- sum(sapply(readRDS(file.path(output,"dadaR1_16S.RDS")), getN))
+
+dadaR2_reads <- sum(sapply(readRDS(file.path(output,"dadaR2_16S.RDS")), getN))
+
+# Print the total number of reads across all files
+cat("Total number of reads R1:", dadaR1_reads, "\n")
+
+#Total number of reads R1: 7571175 
+
+cat("Total number of reads R2:", dadaR2_reads, "\n")
+
+#Total number of reads R2: 7557091 
+
+
+
+########## The number of reads after merging reads
+
+merged_reads <- sum(sapply(readRDS(file.path(output,"mergers_16S.RDS")), getN))
+#Total number of reads: 7275903
+
+
+########## The number of reads after filtering by length
+
+Filter_length <- sum(readRDS(file.path(output, "seqtab_noShort_16S.RDS")))
+#Total number of reads: 6826363
+
+
+########## The number of reads after removing chimeras
+Removing_chimeras <- sum(readRDS(file.path(output, "seqtab_nochim_16S.RDS")))
+#Total number of reads: 6589979
+
+
+
+########## The number of reads after collapsing ASVs
+Collapse_ASV <- sum(readRDS(file.path(output, "seqtab_nochim_coll_16S.RDS")))
+#Total number of reads: 6589979
+```
+
+#Plotting the graph of read loss again
+```{r}
+Raw_Sequences <- 22260012
+Demultiplexed <- 13813935
+Removing_Ns <- 13803895
+Cutting_Primers <- 13803895 
+Filtering <- 7701466
+Inferring_ASVs <- 7571175
+Merged_Reads <- 7275903
+Filter_Length <- 6826363
+Remove_Chimera <- 6589979
+Collape_ASVs <- 6589979
+Assign_Taxonomy <- 6589979
+Tag_Jumping <- 5848562
+
+#creating plot for read loss
+# Create the data frame
+track_df <- data.frame(
+  Step = c("Raw_Sequences", "Demultiplexed", "Removing_Ns", "Cutting_Primers",
+           "Filtering", "Inferring_ASVs", "Merged_Reads", "Filter_Length",
+           "Remove_Chimera", "Collape_ASVs", "Assign_Taxonomy", "Tag_Jumping"),
+  Reads = c(46108462/2, 27627870/2, 27607790/2, 27607790/2, 15402932/2,
+            15128266/2, 7275903, 6826363, 6589979, 6589979, 6589979, 5848562)
+)
+
+# Reorder Step as a factor in the desired order
+track_df$Step <- factor(track_df$Step, levels = c("Raw_Sequences", "Demultiplexed", "Removing_Ns", 
+                                                 "Cutting_Primers", "Filtering", "Inferring_ASVs", 
+                                                 "Merged_Reads", "Filter_Length", "Remove_Chimera", 
+                                                 "Collape_ASVs", "Assign_Taxonomy", "Tag_Jumping"))
+
+# Plotting with ggplot2
+plot <- ggplot(track_df, aes(x = Step, y = Reads)) +
+  geom_line(group = 1, color = "blue") +
+  geom_point(size = 4, shape = 21, fill = "lightblue", color = "blue") +
+  geom_text(aes(label = Reads),
+            angle = 0,
+            hjust = 0.5, # Center the text horizontally
+            vjust = ifelse(1:nrow(track_df) %% 2 == 1, -0.5, 1.5), # Alternate vjust
+            size = 5) +  # Increase text size
+  labs(
+    title = NULL,
+    x = "Processing Step",
+    y = "Number of Reads"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    axis.title.x = element_text(size = 15, face = "bold", color = "black"), # Make x-axis title bold and set color to black
+    axis.title.y = element_text(size = 15, face = "bold", color = "black"), # Make y-axis title bold and set color to black
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 15, color = "black"), # Adjust x-axis label font size and set color to black
+    axis.text.y = element_text(size = 15, color = "black"), # Adjust y-axis label font size and set color to black
+    plot.background = element_rect(color = "white")
+  )
+
+# Display the plot
+print(plot)
+
+# Save the plot with adjusted dimensions
+ggsave(filename = "D:/PhD_Bioinformatics/Big_PNA_Experiment/R/Tag_Jumping/Saved_Images/Read_loss_updated.png", plot = plot, width = 12, height = 7.5)
+
+```
+
+
+#Creating phyloseq object
+```{r}
+#To make the phyloseq object we need three components, the ASV table (samples and ASV abundance), the classification table (ASV and classification) and lastly the metadata (samples and variables) - to combine all the dataframes they must all follow the same naming patterns and order. 
+
+#loading data: 
+
+ASV_table <- t(readRDS(file.path(output, "seqtab_nochim_coll_16S.RDS"))) # Loading ASV table
+
+classification_table <- readRDS(file.path(output, "assignment_16S_SILVA_species.RDS")) #Loading classification table
+
+#Loading Metadata
+Metadata <- read.table(file.path("D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Metadata\\Jim_Metadata.csv"), sep=",", header=TRUE) 
+
+#Renaming sample name to primer labels
+Metadata$Sample_Name <- ifelse(is.na(Metadata$Sample_Name), paste(Metadata$Forward_Primer, Metadata$Reverse_Primer, sep = "_"), Metadata$Sample_Name)
+
+#Remove spaces from column Sample_Name ...
+Metadata$Sample_Name <- gsub(" ", "", Metadata$Sample_Name)
+
+#Removing every even row as there are both R1 and R2 values in there
+Metadata <- Metadata[seq(nrow(Metadata)) %% 2 != 0, ]
+
+
+#Sample name and Primer 
+Sample_name_and_primer <- read.csv("D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Metadata\\Sample_name_and_primers.csv")
+
+#combining sample names so they match with the metadata
+Sample_name_and_primer$Sample_Name <- paste(Sample_name_and_primer$Sample_Name, Sample_name_and_primer$PNA_Clamps_Short)
+
+#Remove spaces from column Sample_Name ...
+Sample_name_and_primer$Sample_Name <- gsub(" ", "", Sample_name_and_primer$Sample_Name)
+
+Metadata_Final <- full_join(Metadata, Sample_name_and_primer, by = "Sample_Name")
+
+
+#This created extra columns of primers, to remove the duplicated primer columns: 
+Metadata_Final <- subset(Metadata_Final, select = -c(Forward_Primer.y, Reverse_Primer.y))
+
+#Renaming columns to remove the x in the other primer duplicates 
+
+column_index_F <- grep("Forward_Primer.x", names(Metadata_Final))
+
+# New name for the column
+new_name <- "Forward_Primer"
+
+# Rename the column directly
+names(Metadata_Final)[column_index_F] <- new_name
+
+
+column_index_R <- grep("Reverse_Primer.x", names(Metadata_Final))
+
+# New name for the column
+new_name <- "Reverse_Primer"
+
+# Rename the column directly
+names(Metadata_Final)[column_index_R] <- new_name
+
+
+#The three dataframes (classification table, ASV table and metadata) above will be combined into one large matrix, but to do so they must all use the same names and be in the correct format and order.
+
+
+#Metadata final has some Sample_Names in a column which are not in the row names of ASV_table, so would need to match them and then remove the ones in the Sample_Names which do not match with the ASV_Table to make them the same so I can create a phyloseq object
+
+matching_sample_names <- intersect(Metadata_Final$Sample_Name, colnames(ASV_table))
+
+# Subset metadata to include only matching sample names
+Metadata_Final <- Metadata_Final[Metadata_Final$Sample_Name %in% matching_sample_names, ]
+
+
+
+#Rearranging metadata so the order of Sample_Name matches with the order of the ASV_table
+
+matching_sample_names <- intersect(Metadata_Final$Sample_Name, colnames(ASV_table))
+
+# Sort Metadata_Final based on Sample_Name
+Metadata_Final_sorted <- Metadata_Final[order(Metadata_Final$Sample_Name), ]
+
+# Subset Metadata_Final to include only matching sample names
+Metadata_Final <- Metadata_Final_sorted[Metadata_Final_sorted$Sample_Name %in% matching_sample_names, ]
+
+
+
+#Making sample_names the first column
+# Get the names of the columns
+col_names <- names(Metadata_Final)
+
+# Swap the positions of the first and fifth columns
+new_col_order <- c(col_names[5], col_names[2:4], col_names[1], col_names[6:length(col_names)])
+
+# Reorder the columns
+Metadata_Final <- Metadata_Final[, new_col_order]
+
+#Making the Sample_Name the row names in the Metadata
+# Set the row names using the values from a specific column
+rownames(Metadata_Final) <- Metadata_Final$Sample_Name
+
+
+#Converting dataframe to matrix for phyloseq
+classification_table <- as.matrix(classification_table)
+
+#Removing the F15 data from metadata_final and ASV_table - one sample F15-R6 is removed as this was causing issues in tag-jumping
+Metadata_Final <- Metadata_Final[!grepl("F15", Metadata_Final$Forward_Primer), ]
+
+# Get column names containing "F15"
+columns_to_remove <- grep("F15", colnames(ASV_table), value = TRUE)
+
+# Remove columns containing "F15"
+ASV_table <- ASV_table[, !colnames(ASV_table) %in% columns_to_remove]
+
+#Assigning all chloroplast and mitochondria as chloroplast and mitochondria
+#Chloroplast is in Order, and mitochondria is in Family - make all the others in each row chloro/mito
+my_phyloseq <- phyloseq(otu_table(ASV_table, taxa_are_rows=TRUE),
+                        sample_data(Metadata_Final),
+                        tax_table(classification_table))
+
+#The phyloseq object was created! Let's test it:
+my_phyloseq
+
+#removing ASVs with less than 100 total reads:
+my_phyloseq <- filter_taxa(my_phyloseq, \(x) any(x > 100), prune = TRUE)
+
+```
+
+
+#Creating tag-jumping function
+```{r}
+library(microViz)
+#Creating function called estimate_colprods - To estimate tag-jumping prediction factor
+estimate_colprods <- function(ps) {
+  phylo_long_colprods <- ps |> #Inputs a phyloseq object 
+    phyloseq::psmelt() |> #Convert phyloseq object into a long format data frame 
+    as_tibble() |> #Converts the the data frame into a tibble format
+    mutate(sum_f = sum(Abundance), .by = "Forward_Primer") |> #Creates a new column called sum_f in the tibble which contains the sum of the Abundance values. .by=F sum is calculated for each unique value of the F (forward primer) variable
+    mutate(sum_r = sum(Abundance), .by = "Reverse_Primer") |> #Repeated but for the reverse primer values
+    mutate(fr = log10(sum_f) + log10(sum_r),#Adds fr to column, calculates log of sum of abundance of F and R and adds them together
+           fr_scale = scale(fr)[,1]) #This creates a new column called fr_scale, and scales values using the scale function and only keeps the scaled values- subtracts the mean and divides everything by the standard deviation
+  
+  phylo_long_colprods #Function returns modified tibble
+}
+
+
+#Creating a function called add_occupancy_thresholds- Which takes two inputs (original data and predicted data) and calculates a threshold based on specified quantile, adds #these thresholds as a new column to the original data, and returns the modified data frame
+add_occupancy_thresholds <- function(ps_long, ps_predictions, pred_quantile = 0.5) {
+  thresholds <- apply(ps_predictions, 2, quantile, probs = pred_quantile) |> 
+    round()
+  
+  ps_long$OccThresh <- thresholds
+  
+  return(ps_long)
+}
+
+
+#Creates a function for filtering a phyloseq object to include only "Sample" from SampleType, arranged the the samples by category wish you wish to arrange and then 
+ps_correct_tj <- function(ps, ps_long_preds) {
+  ## Filter and arrange PS object
+  ps_filt <- ps |> 
+    microViz::ps_filter(SampleType == "Sample", .keep_all_taxa = TRUE) |> 
+    microViz::ps_arrange(Number) |>
+    microViz::tax_sort() |> phyloseq::t()
+  
+  ## Build matrix!
+  thresh_tbl <- ps_long_preds |> 
+    ungroup() |> 
+    arrange(Number) |> #Arranging the samples by the categories you wish to arrange by
+    select(OTU, Number, OccThresh) |> #Selects the chosen columns
+    pivot_wider(names_from = "Number", 
+                values_from = "OccThresh") #Reshapes from long to wide format, with 'Sample' = column name and 'OccThresh' = filling values with this
+  
+  spp <- thresh_tbl$OTU #Extracts the OTU column and stores into a new variable called spp
+  
+  thresh_mat <- thresh_tbl |> 
+    select(-OTU) |> #Selects all columns except for the OTU column
+    as.matrix()
+  rownames(thresh_mat) <- spp #This assigns the spp vector as row names to the thresh_mat matrix
+  
+  ## Zero things
+  tab <- otu_table(ps_filt) #takes out OTU table from filtered phyloseq and stores it into tab
+  tab[tab < thresh_mat] <- 0 #This sets any values in the OTU table which are less than thresh_mat to 0 
+  
+  otu_table(ps_filt) <- tab # This assigns the modified OTU table back to the phyloseq object
+  
+  ps_filt
+}
+
+```
+
+#Applying tag_jumping function
+```{r}
+library(brms)
+library(dplyr)
+library(parallel)
+
+
+ps <- my_phyloseq
+
+colprods <- estimate_colprods(ps) #Calls function estimate_colprods and applies is to the phyloseq object
+
+
+#Building a Bayesian Regression Model from the brms package - 
+thresholds_mod <- brm(formula = bf(Abundance ~ 0 + Intercept + fr_scale + (1 + fr_scale | OTU),
+                                          shape ~ 0 + Intercept + (1 | OTU)),
+                             family = negbinomial(),
+                             prior = c(set_prior("normal(0, 3)", class = "b"),
+                                       set_prior("exponential(2)", class = "sd"),
+                                       set_prior("lkj(3)", class = "cor")),
+                             data = dplyr::filter(colprods, 
+                                                  SampleType == "unused"),
+                             chains = 4,
+                             cores = 1,
+                             threads = threading(16),
+                             silent = 0
+               )
+			   
+
+ps_long_data <- colprods |>
+	filter(SampleType == "Sample") |> #filters to keep only the data points where SampleType is equal to Sample
+	nest_by(OTU, .keep = TRUE) |> #Group the filtered dataset by OTU
+	mutate(Pred = list(posterior_predict(thresholds_mod, newdata = data)), 
+		Quant = list(apply(Pred, 2, \(x) quantile(x, 0.975) |> round())),
+		data = list(bind_cols(data, OccThresh = Quant) |> select(-OTU))
+	) |>
+	select(-Pred, -Quant) |>
+	unnest(cols = c(data))
+	
+ps_corrected <- ps_correct_tj(my_phyloseq, ps_long_data)
+
+
+saveRDS(ps_corrected, "D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Metadata\\Usman_ps_tjc.RDS")
+```
+
+#Assigning chloroplast and mitochondria acrosss all domains for those ASVs
+```{r}
+tj_phyloseq <- readRDS("D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Metadata\\Usman_ps_tjc.RDS")
+
+#Looking for mitochondria in family and chloroplast in order, and if it is present make everytyhing else in that row mitochondria/chloroplast 
+
+# Find rows where "Mitochondria" is present in the Family column
+mito_rows <- which(classification_table_df$Family == "Mitochondria")
+
+# Update all other taxa in those rows to "Mitochondria"
+classification_table_df[mito_rows, ] <- t(apply(classification_table_df[mito_rows, ], 1, function(row) ifelse(!grepl("Mitochondria", row), "Mitochondria", row)))
+
+
+#For Chloroplast
+
+# Find rows where "Chloroplast" is present in the Order column
+chloro_rows <- which(classification_table_df$Order == "Chloroplast")
+
+# Update all other taxa in those rows to "Chloroplast"
+classification_table_df[chloro_rows, ] <- t(apply(classification_table_df[chloro_rows, ], 1, function(row) ifelse(!grepl("Chloroplast", row), "Chloroplast", row)))
+
+
+
+# Convert back to matrix
+classification_table <- as.matrix(classification_table_df)
+
+#recreating phyloseq object
+
+tj_phyloseq <- phyloseq(otu_table(OTU_table_df, taxa_are_rows=TRUE),
+                         sample_data(metadata_df),
+                         tax_table(classification_table))
+```
+
+#Creating another phyloseq object with chloroplast and mitochondria removed
+```{r}
+filtered_tj_phyloseq <- subset_taxa(tj_phyloseq, !Order %in% c("Chloroplast", "Mitochondria"))
+
+#removing NAs from the phylum column
+filtered_tj_phyloseq <- subset_taxa(filtered_tj_phyloseq, !is.na(Phylum))
+```
+
+#Calculating average reads per sample
+```{r}
+ps <- tj_phyloseq
+
+ps <- subset_samples(ps, !Tissue %in% "Neg")
+
+# Extract the sample names
+sample_names <- sample_names(ps)
+
+# Calculate the number of reads per sample
+reads_per_sample <- sample_sums(ps)
+
+# Create a dataframe with sample names and their corresponding read counts
+reads_df <- data.frame(Sample = sample_names, Reads = reads_per_sample)
+
+# Calculate the average number of reads per sample
+average_reads <- mean(reads_per_sample)
+
+# Calculate the median number of reads per sample
+median_reads <- median(reads_per_sample)
+
+# Calculate the standard deviation of reads per sample
+sd_reads <- sd(reads_per_sample)
+
+# Print the dataframe, average reads, median reads, and standard deviation
+print(reads_df)
+cat("Average number of reads per sample:", average_reads, "\n")
+cat("Median number of reads per sample:", median_reads, "\n")
+cat("Standard deviation of reads per sample:", sd_reads)
+
+```
+
+#Calculating the percentage of reads associated to chloroplast and mitochondria before and after clamps
+```{r}
+#tj_phyloseq is the tag_corrected phyloseq
+ps <- tj_phyloseq
+
+# Extract metadata, classification table, and OTU table
+metadata_df <- as.data.frame(sample_data(ps))
+classification_table_df <- as.data.frame(tax_table(ps))
+OTU_table_df <- as.data.frame(otu_table(ps))
+
+#Calculate overall percentage
+# Function to calculate percentage of reads for a given condition and tissue
+calculate_percentage_reads <- function(ps, condition, tissue, families) {
+  samples <- sample_data(ps)$PNA_Clamps == condition & sample_data(ps)$Tissue == tissue
+  otu <- otu_table(ps)[, samples]
+  target_otus <- intersect(rownames(otu), rownames(tax_table(ps))[tax_table(ps)[, "Family"] %in% families])
+  sum(otu[target_otus, , drop = FALSE]) / sum(otu) * 100
+}
+
+# Families to be considered (Chloroplast and Mitochondria)
+families <- c("Chloroplast", "Mitochondria")
+
+# Calculate percentages for different conditions and tissues
+percentage_reads_no_pna_leaf <- calculate_percentage_reads(ps, "None", "Leaf", families)
+percentage_reads_no_pna_bark <- calculate_percentage_reads(ps, "None", "Bark", families)
+percentage_reads_no_pna_root <- calculate_percentage_reads(ps, "None", "Root", families)
+
+percentage_reads_both_pna_leaf <- calculate_percentage_reads(ps, "Both", "Leaf", families)
+percentage_reads_both_pna_bark <- calculate_percentage_reads(ps, "Both", "Bark", families)
+percentage_reads_both_pna_root <- calculate_percentage_reads(ps, "Both", "Root", families)
+
+# Calculate percentage reduction
+percentage_reduction <- function(no_pna, both_pna) {
+  (no_pna - both_pna) / no_pna * 100
+}
+
+percentage_reduction_leaf <- percentage_reduction(percentage_reads_no_pna_leaf, percentage_reads_both_pna_leaf)
+percentage_reduction_bark <- percentage_reduction(percentage_reads_no_pna_bark, percentage_reads_both_pna_bark)
+percentage_reduction_root <- percentage_reduction(percentage_reads_no_pna_root, percentage_reads_both_pna_root)
+
+# Print results
+cat("Overall percentage reduction of chloroplas
+    t and mitochondria reads from None to Both treatment:\n")
+cat("Leaf:", percentage_reduction_leaf, "%\n")
+cat("Bark:", percentage_reduction_bark, "%\n")
+cat("Root:", percentage_reduction_root, "%\n")
+
+
+```
+
+#Calculating percentage of chloroplast and mitochondria specifically in tissue and clamp treatment samples
+```{r}
+# Calculate the percentage of chloroplast reads in samples with PNA_Clamps == "None" and Tissue == "Leaf"
+percentage_chloroplast_reads_no_pna_leaf <- with(sample_data(ps), {
+  samples <- PNA_Clamps == "None" & Tissue == "Leaf"
+  otu <- otu_table(ps)[, samples]
+  chloroplasts <- intersect(rownames(otu), rownames(tax_table(ps))[tax_table(ps)[, "Family"] == "Chloroplast"])
+  sum(otu[chloroplasts, , drop = FALSE]) / sum(otu) * 100
+})
+
+# Print the percentage of chloroplast reads
+percentage_chloroplast_reads_no_pna_leaf
+
+
+# Calculate the percentage of chloroplast reads in samples with PNA_Clamps == "None" and Tissue == "Bark"
+percentage_chloroplast_reads_no_pna_bark <- with(sample_data(ps), {
+  samples <- PNA_Clamps == "None" & Tissue == "Bark"
+  otu <- otu_table(ps)[, samples]
+  chloroplasts <- intersect(rownames(otu), rownames(tax_table(ps))[tax_table(ps)[, "Family"] == "Chloroplast"])
+  sum(otu[chloroplasts, , drop = FALSE]) / sum(otu) * 100
+})
+
+# Print the percentage of chloroplast reads
+percentage_chloroplast_reads_no_pna_bark
+
+
+# Calculate the percentage of chloroplast reads in samples with PNA_Clamps == "None" and Tissue == "Root"
+percentage_chloroplast_reads_no_pna_root <- with(sample_data(ps), {
+  samples <- PNA_Clamps == "None" & Tissue == "Root"
+  otu <- otu_table(ps)[, samples]
+  chloroplasts <- intersect(rownames(otu), rownames(tax_table(ps))[tax_table(ps)[, "Family"] == "Chloroplast"])
+  sum(otu[chloroplasts, , drop = FALSE]) / sum(otu) * 100
+})
+
+# Print the percentage of chloroplast reads
+percentage_chloroplast_reads_no_pna_root
+
+
+
+# Calculate the percentage of mitochondria reads in samples with PNA_Clamps == "None" and Tissue == "Leaf"
+percentage_mitochondria_reads_no_pna_leaf <- with(sample_data(ps), {
+  samples <- PNA_Clamps == "None" & Tissue == "Leaf"
+  otu <- otu_table(ps)[, samples]
+  mitochondria <- intersect(rownames(otu), rownames(tax_table(ps))[tax_table(ps)[, "Family"] == "Mitochondria"])
+  sum(otu[mitochondria, , drop = FALSE]) / sum(otu) * 100
+})
+
+# Print the percentage of chloroplast reads
+percentage_mitochondria_reads_no_pna_leaf
+
+
+# Calculate the percentage of mitochondria reads in samples with PNA_Clamps == "None" and Tissue == "Bark"
+percentage_mitochondria_reads_no_pna_bark <- with(sample_data(ps), {
+  samples <- PNA_Clamps == "None" & Tissue == "Bark"
+  otu <- otu_table(ps)[, samples]
+  mitochondria <- intersect(rownames(otu), rownames(tax_table(ps))[tax_table(ps)[, "Family"] == "Mitochondria"])
+  sum(otu[mitochondria, , drop = FALSE]) / sum(otu) * 100
+})
+
+# Print the percentage of mitochondria reads
+percentage_mitochondria_reads_no_pna_bark
+
+
+# Calculate the percentage of mitochondria reads in samples with PNA_Clamps == "None" and Tissue == "Root"
+percentage_mitochondria_reads_no_pna_root <- with(sample_data(ps), {
+  samples <- PNA_Clamps == "None" & Tissue == "Root"
+  otu <- otu_table(ps)[, samples]
+  mitochondria <- intersect(rownames(otu), rownames(tax_table(ps))[tax_table(ps)[, "Family"] == "Mitochondria"])
+  sum(otu[mitochondria, , drop = FALSE]) / sum(otu) * 100
+})
+
+# Print the percentage of chloroplast reads
+percentage_mitochondria_reads_no_pna_root
+
+
+
+
+
+
+
+# Calculate the percentage of chloroplast reads in samples with PNA_Clamps == "Both" and Tissue == "Leaf"
+percentage_chloroplast_reads_both_pna_leaf <- with(sample_data(ps), {
+  samples <- PNA_Clamps == "Both" & Tissue == "Leaf"
+  otu <- otu_table(ps)[, samples]
+  chloroplasts <- intersect(rownames(otu), rownames(tax_table(ps))[tax_table(ps)[, "Family"] == "Chloroplast"])
+  sum(otu[chloroplasts, , drop = FALSE]) / sum(otu) * 100
+})
+
+# Print the percentage of chloroplast reads
+percentage_chloroplast_reads_both_pna_leaf
+
+
+# Calculate the percentage of chloroplast reads in samples with PNA_Clamps == "Both" and Tissue == "Bark"
+percentage_chloroplast_reads_both_pna_bark <- with(sample_data(ps), {
+  samples <- PNA_Clamps == "Both" & Tissue == "Bark"
+  otu <- otu_table(ps)[, samples]
+  chloroplasts <- intersect(rownames(otu), rownames(tax_table(ps))[tax_table(ps)[, "Family"] == "Chloroplast"])
+  sum(otu[chloroplasts, , drop = FALSE]) / sum(otu) * 100
+})
+
+# Print the percentage of chloroplast reads
+percentage_chloroplast_reads_both_pna_bark
+
+
+# Calculate the percentage of chloroplast reads in samples with PNA_Clamps == "Both" and Tissue == "Root"
+percentage_chloroplast_reads_both_pna_root <- with(sample_data(ps), {
+  samples <- PNA_Clamps == "Both" & Tissue == "Root"
+  otu <- otu_table(ps)[, samples]
+  chloroplasts <- intersect(rownames(otu), rownames(tax_table(ps))[tax_table(ps)[, "Family"] == "Chloroplast"])
+  sum(otu[chloroplasts, , drop = FALSE]) / sum(otu) * 100
+})
+
+# Print the percentage of chloroplast reads
+percentage_chloroplast_reads_both_pna_root
+
+
+
+
+
+
+
+# Calculate the percentage of mitochondria reads in samples with PNA_Clamps == "Both" and Tissue == "Leaf"
+percentage_mitochondria_reads_both_pna_leaf <- with(sample_data(ps), {
+  samples <- PNA_Clamps == "Both" & Tissue == "Leaf"
+  otu <- otu_table(ps)[, samples]
+  mitochondria <- intersect(rownames(otu), rownames(tax_table(ps))[tax_table(ps)[, "Family"] == "Mitochondria"])
+  sum(otu[mitochondria, , drop = FALSE]) / sum(otu) * 100
+})
+
+# Print the percentage of chloroplast reads
+percentage_mitochondria_reads_both_pna_leaf
+
+
+# Calculate the percentage of mitochondria reads in samples with PNA_Clamps == "Both" and Tissue == "Bark"
+percentage_mitochondria_reads_both_pna_bark <- with(sample_data(ps), {
+  samples <- PNA_Clamps == "Both" & Tissue == "Bark"
+  otu <- otu_table(ps)[, samples]
+  mitochondria <- intersect(rownames(otu), rownames(tax_table(ps))[tax_table(ps)[, "Family"] == "Mitochondria"])
+  sum(otu[mitochondria, , drop = FALSE]) / sum(otu) * 100
+})
+
+# Print the percentage of mitochondria reads
+percentage_mitochondria_reads_both_pna_bark
+
+
+# Calculate the percentage of mitochondria reads in samples with PNA_Clamps == "Both" and Tissue == "Root"
+percentage_mitochondria_reads_both_pna_root <- with(sample_data(ps), {
+  samples <- PNA_Clamps == "Both" & Tissue == "Root"
+  otu <- otu_table(ps)[, samples]
+  mitochondria <- intersect(rownames(otu), rownames(tax_table(ps))[tax_table(ps)[, "Family"] == "Mitochondria"])
+  sum(otu[mitochondria, , drop = FALSE]) / sum(otu) * 100
+})
+
+# Print the percentage of chloroplast reads
+percentage_mitochondria_reads_both_pna_root
+
+
+```
+
+#calculating the average percentage change in chloroplast and mitochondria with standard deviation before and after treatment with PNA clamps
+```{r}
+#tj_phyloseq is the tag_corrected phyloseq
+ps <- tj_phyloseq
+
+# Extract metadata, classification table, and OTU table
+metadata_df <- as.data.frame(sample_data(ps))
+classification_table_df <- as.data.frame(tax_table(ps))
+OTU_table_df <- as.data.frame(otu_table(ps))
+
+
+#create new row for Raw_Sample_Name
+metadata_df$Raw_Name <- substr(metadata_df$Sample_Name, 1, nchar(metadata_df$Sample_Name) - 2)
+
+
+
+# Identify chloroplast OTUs
+chloroplast_OTUs <- intersect(rownames(OTU_table_df), rownames(classification_table_df)[classification_table_df$Family == "Chloroplast"])
+
+# Function to calculate chloroplast percentage
+calc_chloroplast_percentage <- function(PNA_group, tissue_type) {
+  samples <- metadata_df$PNA_Clamps == PNA_group & metadata_df$Tissue == tissue_type
+  otu <- OTU_table_df[, samples]
+  chloroplast_reads <- colSums(otu[chloroplast_OTUs, , drop = FALSE])
+  total_reads <- colSums(otu)
+  chloroplast_reads / total_reads * 100
+}
+
+# Calculate percentage change and statistics
+result <- sapply(c("Leaf", "Bark", "Root"), function(tissue) {
+  no_pna <- calc_chloroplast_percentage("None", tissue)
+  both_pna <- calc_chloroplast_percentage("Both", tissue)
+  change <- both_pna - no_pna
+  c(Average_Change = mean(change, na.rm = TRUE), SD_Change = sd(change, na.rm = TRUE))
+})
+
+# Format and print results
+result_df <- data.frame(Tissue = c("Leaf", "Bark", "Root"), t(result))
+print(result_df)
+
+
+
+
+
+# Identify mitochondria OTUs
+mitochondria_OTUs <- intersect(rownames(OTU_table_df), rownames(classification_table_df)[classification_table_df$Family == "Mitochondria"])
+
+# Function to calculate mitochondria percentage
+calc_mitochondria_percentage <- function(PNA_group, tissue_type) {
+  samples <- metadata_df$PNA_Clamps == PNA_group & metadata_df$Tissue == tissue_type
+  otu <- OTU_table_df[, samples]
+  mitochondria_reads <- colSums(otu[mitochondria_OTUs, , drop = FALSE])
+  total_reads <- colSums(otu)
+  mitochondria_reads / total_reads * 100
+}
+
+# Calculate percentage change and statistics
+result <- sapply(c("Leaf", "Bark", "Root"), function(tissue) {
+  no_pna <- calc_mitochondria_percentage("None", tissue)
+  both_pna <- calc_mitochondria_percentage("Both", tissue)
+  change <- both_pna - no_pna
+  c(Average_Change = mean(change, na.rm = TRUE), SD_Change = sd(change, na.rm = TRUE))
+})
+
+# Format and print results
+result_df <- data.frame(Tissue = c("Leaf", "Bark", "Root"), t(result))
+print(result_df)
+
+
+
+
+
+#Bacteria
+
+# Identify chloroplast and mitochondria OTUs
+chloroplast_OTUs <- intersect(rownames(OTU_table_df), rownames(classification_table_df)[classification_table_df$Family == "Chloroplast"])
+mitochondria_OTUs <- intersect(rownames(OTU_table_df), rownames(classification_table_df)[classification_table_df$Family == "Mitochondria"])
+
+# Function to calculate percentage of reads that are neither chloroplast nor mitochondria
+calc_other_percentage <- function(PNA_group, tissue_type) {
+  samples <- metadata_df$PNA_Clamps == PNA_group & metadata_df$Tissue == tissue_type
+  otu <- OTU_table_df[, samples]
+  other_reads <- colSums(otu) - colSums(otu[chloroplast_OTUs, , drop = FALSE]) - colSums(otu[mitochondria_OTUs, , drop = FALSE])
+  total_reads <- colSums(otu)
+  other_reads / total_reads * 100
+}
+
+# Calculate percentage change and statistics
+result <- sapply(c("Leaf", "Bark", "Root"), function(tissue) {
+  no_pna <- calc_other_percentage("None", tissue)
+  both_pna <- calc_other_percentage("Both", tissue)
+  change <- both_pna - no_pna
+  c(Average_Change = mean(change, na.rm = TRUE), SD_Change = sd(change, na.rm = TRUE))
+})
+
+# Format and print results
+result_df <- data.frame(Tissue = c("Leaf", "Bark", "Root"), t(result))
+print(result_df)
+
+```
+
+#Check how many unique ASVs of chloroplast and mitochondria are present
+```{r}
+# Extract OTU table and taxonomy table
+OTU_table <- as.matrix(otu_table(tj_phyloseq))  # Convert to matrix for easier manipulation
+tax_table <- as.data.frame(tax_table(tj_phyloseq))  # Convert taxonomy table to data frame
+
+# Identify chloroplast and mitochondria OTUs
+chloroplast_OTUs <- rownames(tax_table)[tax_table$Family == "Chloroplast"]
+mitochondria_OTUs <- rownames(tax_table)[tax_table$Family == "Mitochondria"]
+
+# Count unique ASVs assigned to chloroplast and mitochondria
+unique_chloroplast_ASVs <- sum(rownames(OTU_table) %in% chloroplast_OTUs)
+unique_mitochondria_ASVs <- sum(rownames(OTU_table) %in% mitochondria_OTUs)
+
+# Print the results
+cat("Number of unique ASVs assigned to Chloroplast:", unique_chloroplast_ASVs, "\n")
+cat("Number of unique ASVs assigned to Mitochondria:", unique_mitochondria_ASVs, "\n")
+
+```
+
+
+#calculating the number of chloropalst and mitochondria ASVs before and after adding PNA clamps
+```{r}
+ps <- tj_phyloseq
+
+# Filter out negative control samples from phyloseq object
+ps <- subset_samples(ps, !Tissue %in% "Neg")
+
+#subsetting the phyloseq object to only the chlorplast or mitochondria
+
+#Chloroplast
+taxonomy_table <- tax_table(ps)
+
+#identifying all the chloroplast ASVs
+chloroplast_asvs <- rownames(taxonomy_table)[apply(taxonomy_table, 1, function(x) any(grepl("Chloroplast", x)))]
+
+#subset the phyloseq object to only keep the chloroplast ASVs
+chloroplast_ps<- prune_taxa(chloroplast_asvs, ps)
+
+#Chloroplast
+taxonomy_table_chloro <- as.data.frame(tax_table(chloroplast_ps))
+
+
+
+#Mitochondria
+#identifying all the mitochondria ASVs
+mitochondria_asvs <- rownames(taxonomy_table)[apply(taxonomy_table, 1, function(x) any(grepl("Mitochondria", x)))]
+
+#subset the phyloseq object to only keep the mitochondria ASVs
+mitochondria_ps <- prune_taxa(mitochondria_asvs, ps)
+
+taxonomy_table_mito <- as.data.frame(tax_table(mitochondria_ps))
+
+
+
+#splitting the phyloseq objects to before and after PNA clamp treatment for chloroplast and mitochondria
+#Chloroplast
+before_chloro <- subset_samples(chloroplast_ps, grepl("_N", sample_data(chloroplast_ps)$PNA_Clamps_Short))
+
+after_chloro <- subset_samples(chloroplast_ps, grepl("_B", sample_data(chloroplast_ps)$PNA_Clamps_Short))
+
+#Mitochondria
+before_mito <- subset_samples(mitochondria_ps, grepl("_N", sample_data(mitochondria_ps)$PNA_Clamps_Short))
+
+after_mito <- subset_samples(mitochondria_ps, grepl("_B", sample_data(mitochondria_ps)$PNA_Clamps_Short))
+
+
+# Calculate the total number of each ASV for each phyloseq object
+total_counts_df_before_chloro <- as.data.frame(taxa_sums(before_chloro))
+colnames(total_counts_df_before_chloro) <- "Abundance"
+
+total_counts_df_after_chloro <- as.data.frame(taxa_sums(after_chloro))
+colnames(total_counts_df_after_chloro) <- "Abundance"
+
+total_counts_df_before_mito <- as.data.frame(taxa_sums(before_mito))
+colnames(total_counts_df_before_mito) <- "Abundance"
+
+total_counts_df_after_mito <- as.data.frame(taxa_sums(after_mito))
+colnames(total_counts_df_after_mito) <- "Abundance"
+
+
+
+#sum of all chloroplast and mitochodnria ASVs
+total_sum_before_chloro <- sum(total_counts_df_before_chloro$Abundance, na.rm = TRUE)
+total_sum_after_chloro <- sum(total_counts_df_after_chloro$Abundance, na.rm = TRUE)
+total_sum_before_mito <- sum(total_counts_df_before_mito$Abundance, na.rm = TRUE)
+total_sum_after_mito <- sum(total_counts_df_after_mito$Abundance, na.rm = TRUE)
+
+
+
+
+# Merge total count dataframes
+
+#Chloroplast
+total_counts_merged_chloro <- merge(total_counts_df_before_chloro, total_counts_df_after_chloro, by = "row.names", suffixes = c("_before", "_after"))
+
+#Mitochondria
+total_counts_merged_mito <- merge(total_counts_df_before_mito, total_counts_df_after_mito, by = "row.names", suffixes = c("_before", "_after"))
+
+#melting the dataframe for plotting
+library(reshape2)
+melted_data_chloro <- melt(total_counts_merged_chloro, id.vars = "Row.names")
+melted_data_mito <- melt(total_counts_merged_mito, id.vars = "Row.names")
+
+# Rename columns
+colnames(melted_data_chloro) <- c("ASV", "Treatment", "Abundance")
+colnames(melted_data_mito) <- c("ASV", "Treatment", "Abundance")
+
+#converting values to numeric
+melted_data_chloro$Abundance <- as.numeric(melted_data_chloro$Abundance)
+
+# Plot ASV abundance before and after chloroplast treatment as boxplots with log scale
+chloro_boxplot <- ggplot(melted_data_chloro, aes(x = Treatment, y = Abundance, fill = Treatment)) +
+  geom_boxplot(outlier.shape = NA) +  # Create boxplots
+  geom_jitter(width = 0.1) +  # Add jittered points
+  geom_segment(aes(x = Treatment, xend = Treatment, y = Abundance, yend = Abundance), color = "grey", size = 0.5) +  # Add connecting lines
+  labs(title = "ASV Abundance Before and After Chloroplast Treatment",
+       x = "Treatment", y = "Abundance") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_y_log10()  # Add log scale to y-axis
+
+chloro_boxplot
+
+# Plot ASV abundance before and after mitochondria treatment as boxplots with log scale, points, and connecting lines
+mito_boxplot <- ggplot(melted_data_mito, aes(x = Treatment, y = Abundance, fill = Treatment)) +
+  geom_boxplot(outlier.shape = NA) +  # Create boxplots
+  geom_jitter(width = 0.1) +  # Add jittered points
+  geom_segment(aes(x = Treatment, xend = Treatment, y = Abundance, yend = Abundance), color = "grey", size = 0.5) +  # Add connecting lines
+  labs(title = "ASV Abundance Before and After Mitochondria Treatment",
+       x = "Treatment", y = "Abundance") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_y_log10()  # Add log scale to y-axis
+
+mito_boxplot
+
+
+
+#calculating specifics: 
+#how many ASVs were there before and after? Check the ASVs with 0 total reads
+counts_cloro_before <- table(total_counts_df_before_chloro$`taxa_sums(before_chloro)` == 0)
+counts_cloro_before
+
+counts_cloro_after <- table(total_counts_df_after_chloro$`taxa_sums(after_chloro)` == 0)
+counts_cloro_after
+
+#26 ASVs with more than 0 before and then 51 ASVs with more than 0 reads after
+
+counts_mito_before <- table(total_counts_df_before_mito$`taxa_sums(before_mito)` == 0)
+counts_mito_before
+
+counts_mito_after <- table(total_counts_df_after_mito$`taxa_sums(after_mito)` == 0)
+counts_mito_after
+
+#35 ASVs with more than 0 reads, but after clamp treatment there were 87
+
+
+#counting number of reads associated to chloroplast and mitochondria before and after clamp treatment
+
+total_sum_chloro_before <- sum(total_counts_df_before_chloro$`taxa_sums(before_chloro)`, na.rm = TRUE)
+total_sum_chloro_before
+
+total_sum_chloro_after <- sum(total_counts_df_after_chloro$`taxa_sums(after_chloro)`, na.rm = TRUE)
+total_sum_chloro_after
+
+total_sum_mito_before <- sum(total_counts_df_before_mito$`taxa_sums(before_mito)`, na.rm = TRUE)
+total_sum_mito_before
+
+total_sum_mito_after <- sum(total_counts_df_after_mito$`taxa_sums(after_mito)`, na.rm = TRUE)
+total_sum_mito_after
+```
+
+
+#creating a fasta file with all the chloroplast and mitochondria ASVs
+```{r}
+#preparing data for fasta
+#rearranging order of ASVs 
+chloro_ordered <- total_counts_merged_chloro[order(total_counts_merged_chloro$`taxa_sums(before_chloro)`, decreasing = TRUE), ]
+
+chloro_ordered$asv <- paste0("ASV", 1:nrow(chloro_ordered))
+
+chloro_ordered <- chloro_ordered[, -c(2, 3)]
+
+names(chloro_ordered)[1] <- "sequence"
+
+
+# Specify the output file path and name
+chloro_fasta_file <- "D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\chloro.fasta"
+
+# Open a connection to the output file
+file_conn <- file(chloro_fasta_file, "w")
+
+# Write the sequences to the FASTA file
+for (i in 1:nrow(chloro_ordered)) {
+  # Write the header line (ASV name)
+  writeLines(paste0(">", chloro_ordered$asv[i]), file_conn)
+  # Write the sequence line
+  writeLines(chloro_ordered$sequence[i], file_conn)
+}
+
+# Close the file connection
+close(file_conn)
+
+
+#repeating for mitochondria
+
+mito_ordered <- total_counts_merged_mito[order(total_counts_merged_mito$`taxa_sums(before_mito)`, decreasing = TRUE), ]
+
+mito_ordered$asv <- paste0("ASV", 1:nrow(mito_ordered))
+
+mito_ordered <- mito_ordered[, -c(2, 3)]
+
+names(mito_ordered)[1] <- "sequence"
+
+# Specify the output file path and name
+mito_fasta_file <- "D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\mito.fasta"
+
+# Open a connection to the output file
+file_conn <- file(mito_fasta_file, "w")
+
+# Write the sequences to the FASTA file
+for (i in 1:nrow(mito_ordered)) {
+  # Write the header line (ASV name)
+  writeLines(paste0(">", mito_ordered$asv[i]), file_conn)
+  # Write the sequence line
+  writeLines(mito_ordered$sequence[i], file_conn)
+}
+
+# Close the file connection
+close(file_conn)
+```
+
+#Calculating the number of ASVs in leaf, bark and roots before and after clamps
+```{r}
+# Filter out negative control samples from phyloseq object
+ps <- subset_samples(filtered_tj_phyloseq, !Tissue %in% "Neg")
+
+# Assume your phyloseq object is named `ps`
+# Extract the OTU table
+otu_table <- as.data.frame(otu_table(ps))
+
+# If the OTU table is not already a matrix, convert it to one
+if (!is.matrix(otu_table)) {
+  otu_table <- as(otu_table, "matrix")
+}
+
+# Transpose the OTU table so that samples are rows and ASVs are columns
+otu_table <- t(otu_table)
+
+# Convert the OTU table to a logical matrix where counts > 0 are TRUE
+otu_logical <- otu_table > 0
+
+# Sum the logical matrix by rows to get the number of unique ASVs per sample
+unique_asvs_per_sample <- rowSums(otu_logical)
+
+# Extract sample data
+sample_data <- data.frame(sample_data(ps))
+
+# Create a summary data frame
+summary_df <- data.frame(
+  Sample = rownames(sample_data),
+  Unique_ASVs = unique_asvs_per_sample[rownames(sample_data)]
+)
+
+# Print the summary data frame
+print(summary_df)
+
+
+summary_df_B <- subset(summary_df, grepl("B$", Sample))
+summary_df_N <- subset(summary_df, grepl("N$", Sample))
+
+
+
+
+# Function to map "-B", "-L", "-R" to "Bark", "Leaf", "Root"
+map_sample_type <- function(sample_name) {
+  if (grepl("-B", sample_name)) {
+    return("Bark")
+  } else if (grepl("-L", sample_name)) {
+    return("Leaf")
+  } else if (grepl("-R", sample_name)) {
+    return("Root")
+  } else {
+    return(NA)
+  }
+}
+
+# Apply the function to create the new column in each data frame
+summary_df_B$Sample_Type <- sapply(summary_df_B$Sample, map_sample_type)
+summary_df_N$Sample_Type <- sapply(summary_df_N$Sample, map_sample_type)
+
+# Calculate mean and standard deviation for summary_df_B
+summary_stats_B <- summary_df_B %>%
+  group_by(Sample_Type) %>%
+  summarise(
+    Mean_Unique_ASVs = mean(Unique_ASVs),
+    SD_Unique_ASVs = sd(Unique_ASVs)
+  )
+
+# Calculate mean and standard deviation for summary_df_N
+summary_stats_N <- summary_df_N %>%
+  group_by(Sample_Type) %>%
+  summarise(
+    Mean_Unique_ASVs = mean(Unique_ASVs),
+    SD_Unique_ASVs = sd(Unique_ASVs)
+  )
+
+
+# Print the summary statistics
+print(summary_stats_B)
+print(summary_stats_N)
+```
+
+#Alpha diversity graph - excluding chloroplast and mitochondria
+```{r}
+library(phyloseq)
+library(ggplot2)
+library(ggsignif)
+
+# Shannon of filtered dataset
+# Extract Shannon diversity data
+shannon_data <- estimate_richness(filtered_tj_phyloseq, measures = "Shannon")
+
+# Convert phyloseq object to dataframe
+df <- as(sample_data(filtered_tj_phyloseq), "data.frame")
+df$Shannon <- shannon_data$Shannon
+
+# Filter out rows with "Neg" in the Tissue column
+df_filtered <- df[df$Tissue != "Neg", ]
+
+# Convert PNA_Clamps to a factor with the desired order
+df_filtered$PNA_Clamps <- factor(df_filtered$PNA_Clamps, levels = c("None", "Both"))
+
+# Define custom color palette with transparency
+custom_colors <- c("None" = "#3182bd80", "Both" = "#de2d2680")
+
+# Reorder levels of Tissue variable
+df_filtered$Tissue <- factor(df_filtered$Tissue, levels = c("Leaf", "Bark", "Root"))
+
+# Create the alpha diversity plot with the updated order of facets
+alpha_diversity_plot <- ggplot(df_filtered, aes(x = PNA_Clamps, y = Shannon, fill = PNA_Clamps)) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(width = 0.75), alpha = 0.8) +
+  geom_jitter(width = 0.2, alpha = 0.6, color = "black", size = 2) +
+  facet_wrap(~ Tissue, scales = "free_x") +
+  labs(x = NULL, y = "Shannon Diversity Index") +
+  scale_fill_manual(values = custom_colors, 
+                    breaks = c("None", "Both"),
+                    labels = c("None", "pPNA +\nqmPNA"),
+                    name = "PNA Clamps") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.title.y = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12),
+    legend.position = "right",
+    legend.box.margin = margin(1, 1, 1, 1),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 14, face = "bold"),
+    panel.grid.minor.x = element_blank(),
+    panel.background = element_rect(fill = "grey90"),
+    panel.border = element_blank(),
+    plot.caption = element_text(hjust = 0),
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "cm"),
+    plot.background = element_rect(color = "white")
+  ) +
+  guides(fill = guide_legend(override.aes = list(shape = NA)))
+
+# Add significance comparisons
+alpha_diversity_plot <- alpha_diversity_plot + geom_signif(comparisons = list(c("None", "Both"), c("None", "Both"), c("None", "Both")), 
+                                                          map_signif_level = TRUE, textsize = 5,
+                                                          test = "wilcox.test")
+
+# Print the plot
+print(alpha_diversity_plot)
+
+# Save the plot
+ggsave("D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Saved_Images\\filtered_shannon_exc_chloro_final.png", alpha_diversity_plot, width = 10, height = 6, dpi = 600)
+```
+
+#Stats for for shannon diversity
+```{r}
+# Extract Shannon diversity data
+shannon_data <- estimate_richness(filtered_tj_phyloseq, measures = "Shannon")
+
+# Convert phyloseq object to dataframe
+df <- as(sample_data(filtered_tj_phyloseq), "data.frame")
+df$Shannon <- shannon_data$Shannon
+
+# Filter out rows with "Neg" in the Tissue column
+df_filtered <- df[df$Tissue != "Neg", ]
+wilcox_df <- df_filtered
+
+# Perform Wilcoxon Rank-Sum Test on all samples no clamps vs both clamps
+wilcox_test_result_all <- wilcox.test(Shannon ~ Clamps, data = wilcox_df)
+
+# Print the results
+print(wilcox_test_result_all)
+
+
+
+#subsetting dataframe into leaf, bark and root to see the wilcox results of no clamp vs both clamps in 
+
+# Subset dataframe based on tissue column
+wilcox_df_leaf <- subset(df_filtered, Tissue == "Leaf")
+wilcox_df_bark <- subset(df_filtered, Tissue == "Bark")
+wilcox_df_root <- subset(df_filtered, Tissue == "Root")
+
+#Performing Wilcoxon Rank-Sum Test on all tissue types 
+
+wilcox_test_result_leaf <- wilcox.test(Shannon ~ Clamps, data = wilcox_df_leaf)
+wilcox_test_result_bark <- wilcox.test(Shannon ~ Clamps, data = wilcox_df_bark)
+wilcox_test_result_root <- wilcox.test(Shannon ~ Clamps, data = wilcox_df_root)
+
+#Printing the results
+print("Leaf")
+print(wilcox_test_result_leaf)
+
+print("Bark")
+print(wilcox_test_result_bark)
+
+print("Root")
+print(wilcox_test_result_root)
+```
+
+#Beta Diversity graph with normalised data
+```{r}
+# Filter the phyloseq object to exclude negative control samples
+ps <- subset_samples(filtered_tj_phyloseq, !Tissue %in% "Neg")
+
+ps.prop <- transform_sample_counts(ps, function(otu) otu/sum(otu))
+set.seed(2)
+# Perform Bray-Curtis NMDS ordination
+ord.nmds.bray <- ordinate(ps.prop, method = "NMDS", distance = "bray")
+
+# Define colors for different Tissue categories
+tissue_colors <- c("Leaf" = "#1b9e77", "Bark" = "#d95f02", "Root" = "#7570b3")
+
+beta_plot <- plot_ordination(ps.prop, ord.nmds.bray, color = "Tissue", shape = "PNA_Clamps") +
+  scale_color_manual(values = tissue_colors, name = "Tissue") +  
+  scale_shape_manual(
+    breaks = c("None", "Both"),
+    labels = c("None", "pPNA +\nqmPNA"),
+    values = c(24, 16),  # Specify the shapes directly here
+    name = "PNA Clamps"
+  ) +
+  geom_point(size = 3, alpha = 1, stroke = 1) +  
+  theme(
+    legend.position = "right",  
+    text = element_text(size = 12, family = "Helvetica"),  
+    plot.title = element_text(size = 16, face = "bold"),  
+    panel.grid.major = element_blank(),  
+    panel.grid.minor = element_blank(),  
+    panel.border = element_blank(),  
+    axis.line = element_line(color = "black"),  
+    legend.background = element_rect(fill = "transparent", color = NA),  
+    panel.background = element_rect(fill = "white"),  
+    axis.text = element_text(color = "black"),  
+    legend.key = element_blank(),  # Remove legend key
+    legend.title = element_text(size = 14, face = "bold"),  # Remove italics from legend titles
+    legend.text = element_text(size = 12)
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(linetype = 0)),  # Remove the line through the legend key
+    fill = guide_legend(
+      title = "Species", 
+      label = TRUE, 
+      label.theme = element_text(face = "italic"),  # Italicize species names
+      override.aes = list(color = NA)  # Remove the line through the colors
+    )
+  ) +
+  stat_ellipse(aes(linetype = PNA_Clamps)) +
+  labs(linetype = "PNA Clamps") +
+  scale_linetype_manual(values = c("None" = "dashed", "Both" = "solid"), 
+                        labels = c("None", "pPNA +\nqmPNA"),
+                        breaks = c("None", "Both")) +
+  guides(linetype = guide_legend(title = "PNA Clamps\nwithin Tissue"))
+
+# Display the customized ordination plot
+print(beta_plot)
+
+ggsave("D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Saved_Images\\beta_plot_filled_extra_final_normalised_species_removed.png", beta_plot, width = 10, height = 6,dpi = 600)
+```
+
+
+#beta diversity statistics calculations
+```{r}
+# Filter the phyloseq object to exclude negative control samples
+ps <- subset_samples(filtered_tj_phyloseq, !Tissue %in% "Neg")
+
+#Transforming data
+ps.prop_all <- transform_sample_counts(ps, function(otu) otu/sum(otu))
+
+#Calculating bray curtis distance matrix
+bray_dist <- phyloseq::distance(ps.prop_all, method = "bray")
+
+# make a data frame from the sample_data
+ps_df <- data.frame(sample_data(ps.prop_all))
+
+set.seed(7)
+adonis(bray_dist ~ Clamps*Tissue + Species, ps_df, permutations = 999)
+
+
+#conducting stats calculations on Tissue subsets
+
+# Subset by Leaf, Bark, and Root tissues
+ps_leaf <- subset_samples(ps, Tissue == "Leaf")
+ps_bark <- subset_samples(ps, Tissue == "Bark")
+ps_root <- subset_samples(ps, Tissue == "Root")
+
+# Function to perform the calculations and adonis analysis
+perform_adonis <- function(ps_subset) {
+  # Transforming data
+  ps.prop <- transform_sample_counts(ps_subset, function(otu) otu / sum(otu))
+  
+  # Calculating Bray-Curtis distance matrix
+  bray_dist <- phyloseq::distance(ps.prop, method = "bray")
+  
+  # Make a data frame from the sample_data
+  ps_df <- data.frame(sample_data(ps.prop))
+  
+  # Perform adonis analysis
+  set.seed(7)
+  adonis_result <- adonis(bray_dist ~ Clamps + Species, ps_df, permutations = 999)
+  
+  return(adonis_result)
+}
+
+# Perform the analysis for each subset
+adonis_leaf <- perform_adonis(ps_leaf)
+adonis_bark <- perform_adonis(ps_bark)
+adonis_root <- perform_adonis(ps_root)
+
+# Print the results
+adonis_leaf
+adonis_bark
+adonis_root
+```
+
+
+
+#Making relative abundance graph to see chloroplast and mitochondria - Organising data for graph
+```{r}
+# Assign phyloseq object to ps
+ps <- tj_phyloseq
+
+# Convert to data frames
+metadata_df <- as.data.frame(sample_data(ps))
+classification_table_df <- as.data.frame(tax_table(ps))
+OTU_table_df <- as.data.frame(otu_table(ps))
+
+#Time to reorder the phyloseq object so it goes Mito, Chloro and then Bacteria in Kingdom
+
+# Reorder tax_tab/classification table in reverse alphabetical order by Kingdom column
+classification_table_df_reordered <- classification_table_df[order(classification_table_df$Kingdom, decreasing = TRUE), ]
+
+# Reorder OTU table to match the order of tax_tab by row names
+otu_tab_df_reordered <- OTU_table_df[rownames(classification_table_df_reordered), ]
+
+#remove the last 5 rows which contains 5 asvs which are NA
+# Remove the last 5 rows from classification_table_df_reordered
+classification_table_df_reordered <- classification_table_df_reordered[1:(nrow(classification_table_df_reordered) - 5), ]
+
+# Remove the last 5 rows from otu_tab_df_reordered
+otu_tab_df_reordered <- otu_tab_df_reordered[1:(nrow(otu_tab_df_reordered) - 5), ]
+
+#converting dataframes to matrix
+otu_tab_df_reordered <- as.matrix(otu_tab_df_reordered)
+classification_table_df_reordered <- as.matrix(classification_table_df_reordered)
+
+
+#Adding an extra sample column variable to metadata_df
+metadata_df$Sample_Name_Only <- substring(metadata_df$Sample_Name, 1, nchar(metadata_df$Sample_Name) - 2)
+
+
+
+# Create the new phyloseq object
+ps_reordered <- phyloseq(otu_table(otu_tab_df_reordered, taxa_are_rows=TRUE),
+                         sample_data(metadata_df),
+                         tax_table(classification_table_df_reordered))
+
+
+
+
+# Compute relative abundance
+ps_reordered <- transform_sample_counts(ps_reordered, function(x) x / sum(x))
+
+# Filter out "Neg" samples based on Tissue
+ps_no_neg <- prune_samples(sample_data(ps_reordered)$Tissue != "Neg", ps_reordered)
+
+# Filter out "Neg" samples based on PNA_Clamps
+ps_reordered_cleaned <- prune_samples(sample_data(ps_no_neg)$PNA_Clamps != "Neg", ps_no_neg)
+
+
+#Plotting relaative abundance graph
+
+# Modify the levels and labels for Tissue and PNA_Clamps separately
+levels_order_tissue <- c("Leaf", "Bark", "Root")
+labels_order_tissue <- c("Leaf", "Bark", "Root")
+
+levels_order_pna <- c("None", "Both")
+labels_order_pna <- c("No Clamps", "pPNA + qmPNA")
+
+# Convert to factor with desired order and labels for Tissue
+sample_data(ps_reordered_cleaned)$Tissue <- factor(sample_data(ps_reordered_cleaned)$Tissue, 
+                                                  levels = levels_order_tissue, 
+                                                  labels = labels_order_tissue)
+
+# Convert to factor with desired order and labels for PNA_Clamps
+sample_data(ps_reordered_cleaned)$PNA_Clamps <- factor(sample_data(ps_reordered_cleaned)$PNA_Clamps, 
+                                                      levels = levels_order_pna, 
+                                                      labels = labels_order_pna)
+
+custom_colors <- c("Chloroplast" = "#66CC66",   
+                   "Mitochondria" = "#336699",  
+                   "Bacteria" = "#FF7733")    
+
+# Plot relative abundance
+plot_relative_abundance <- plot_bar(ps_reordered_cleaned, x = "Sample_Name_Only", fill = "Kingdom") + 
+  facet_grid(PNA_Clamps ~ Tissue, scales = "free") +
+  labs(title = NULL,
+       y = "Relative Abundance \n(% 16S rRNA Gene Sequences)",
+       x = NULL) +  # Remove x-axis label
+  geom_bar(aes(color = Kingdom), stat = "identity", position = "stack") +
+  scale_fill_manual(values = custom_colors) +  # Set custom fill colors
+  scale_color_manual(values = custom_colors, guide = "none") +  # Remove color legend
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),  # Remove x-axis ticks
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),  # Remove border around facets
+    text = element_text(size = 16, face = "bold"),  # Increase font size and make text bold
+    axis.title.y = element_text(size = 18, face = "bold"),  # Increase y-axis title font size and make it bold
+    strip.text = element_text(size = 16, face = "bold"),  # Increase facet labels font size and make them bold
+    legend.title = element_text(size = 16, face = "bold"),  # Increase legend title font size and make it bold
+    legend.text = element_text(size = 14, face = "bold")  # Increase legend text font size and make it bold
+  )
+
+plot_relative_abundance
+
+# Save plot
+ggsave("D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Saved_Images\\filtered_relative_abundance_all_colour_inc_Chloro_Final_Final.png", 
+       plot_relative_abundance, width = 10, height = 6, dpi = 600)
+```
+
+
+
+#relative abundance graph excluding chloroplast and mitochondria
+```{r}
+#renaming to filtered phyloseq, this object contains ASV data without chloroplast and mitochondria
+filtered_phyloseq <- filtered_tj_phyloseq
+
+
+# Filter out "Neg" samples based on Tissue
+filtered_phyloseq_no_neg <- prune_samples(sample_data(filtered_phyloseq)$Tissue != "Neg", filtered_phyloseq)
+
+# Convert to data frames
+metadata_df <- as.data.frame(sample_data(filtered_phyloseq_no_neg))
+classification_table_df <- as.data.frame(tax_table(filtered_phyloseq_no_neg))
+OTU_table_df <- as.data.frame(otu_table(filtered_phyloseq_no_neg))
+
+
+
+# Calculate total abundance for each sample (row)
+total_abundance <- rowSums(OTU_table_df[, -1])  # Exclude the first column (Sample_Name)
+
+# Add total abundance as a new column to OTU table
+OTU_table_df$Total_Abundance <- total_abundance
+
+# Reorder the rows based on total abundance in descending order
+OTU_table_df <- OTU_table_df[order(-OTU_table_df$Total_Abundance), ]
+
+# Remove the Total_Abundance column
+OTU_table_df$Total_Abundance <- NULL
+
+
+
+#reordering classification table
+# Get the row names of OTU_table_df
+otu_row_names <- rownames(OTU_table_df)
+
+# Reorder the rows of classification_table_df to match the row names of OTU_table_df
+classification_table_df <- classification_table_df[match(otu_row_names, rownames(classification_table_df)), ]
+
+
+#getting the names of the top 10 most abundant phyla
+
+# Get the first 10 unique names from the Phylum column
+top6_phyla <- head(unique(classification_table_df$Phylum), 6)
+
+# Print the list
+print(top6_phyla)
+
+
+
+# Replace names not in top10_phyla with "Other"
+classification_table_df$Phylum[!(classification_table_df$Phylum %in% top6_phyla)] <- "Other"
+
+#Adding an extra sample column variable to metadata_df
+metadata_df$Sample_Name_Only <- substring(metadata_df$Sample_Name, 1, nchar(metadata_df$Sample_Name) - 2)
+
+
+#converting dataframes to matrix
+OTU_table_df <- as.matrix(OTU_table_df)
+classification_table_df <- as.matrix(classification_table_df)
+
+
+# Create the new phyloseq object
+ps_phylum <- phyloseq(otu_table(OTU_table_df, taxa_are_rows=TRUE),
+                         sample_data(metadata_df),
+                         tax_table(classification_table_df))
+
+
+classification_table_df_check <- as.data.frame(tax_table(ps_phylum))
+
+
+
+# Compute relative abundance
+ps_phylum <- transform_sample_counts(ps_phylum, function(x) x / sum(x))
+
+
+#Plotting relative abundance graph excluding chloro and mito
+
+#changing the name labels for the facet orders
+
+# Modify the levels and labels for Tissue and PNA_Clamps separately
+levels_order_tissue <- c("Leaf", "Bark", "Root")
+labels_order_tissue <- c("Leaf", "Bark", "Root")
+
+levels_order_pna <- c("None", "Both")
+labels_order_pna <- c("No PNA Clamps", "With pPNA + qmPNA Clamps")
+
+# Convert to factor with desired order and labels for Tissue
+sample_data(ps_phylum)$Tissue <- factor(sample_data(ps_phylum)$Tissue, 
+                                        levels = levels_order_tissue, 
+                                        labels = labels_order_tissue)
+
+# Convert to factor with desired order and labels for PNA_Clamps
+sample_data(ps_phylum)$PNA_Clamps <- factor(sample_data(ps_phylum)$PNA_Clamps, 
+                                            levels = levels_order_pna, 
+                                            labels = labels_order_pna)
+
+# Define a custom color palette
+my_colors <- c("#3A5C9B", "#FF7C35", "#4B9E5B", "grey", "#D63B3D", "#6F74B9", "#3DAEDF", "#E7C84D", "#81A54E", "#4086B2") 
+
+plot_relative_abundance_exc_cont_aes <- plot_bar(ps_phylum, x = "Sample_Name_Only", fill = "Phylum") + 
+  facet_grid(PNA_Clamps ~ Tissue, scales = "free", ) +
+  labs(title = NULL,
+       x = NULL,  # Rename x-axis
+       y = "Relative Abundance \n(% 16S rRNA Gene Reads)") + 
+  geom_bar(aes(color = Phylum), stat = "identity", position = "stack") +
+  theme(
+    axis.text.x = element_blank(),
+    strip.text.x = element_text(face = "bold", size = 14),  # Increase font size for x-axis facet labels
+    strip.text.y = element_text(face = "bold", size = 14),  # Increase font size for y-axis facet labels
+    text = element_text(size = 12),  # Increase font size for text elements
+    axis.title = element_text(size = 14, face = "bold"),  # Increase font size for axis titles
+    legend.text = element_text(size = 12),  # Increase font size for legend text
+    legend.title = element_text(size = 14, face = "bold"),  # Increase font size for legend title
+    axis.ticks.x = element_blank(),  # Remove ticks on x-axis
+    strip.background = element_rect(fill = "grey90", color = NA), 
+    panel.background = element_rect(fill = "grey95"),
+  ) +
+  scale_fill_manual(values = my_colors) + # Set fill color palette manually
+ scale_color_manual(values = my_colors) # Set color palette manually
+
+plot_relative_abundance_exc_cont_aes
+
+ggsave("D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Saved_Images\\filtered_relative_abundance_excl_cont_corrected_coloured_final.png",plot_relative_abundance_exc_cont_aes, width = 10, height = 6, dpi = 600)
+```
+
+
+#Combining alpha diversity, relative abundance, and beta diversity
+```{r}
+library(cowplot)
+library(gridExtra)
+
+alpha_plot_graph <- alpha_diversity_plot #alpha diversity plot
+beta_plot_graph <- beta_plot #beta diversity plot
+relative_abundance_plot_graph <- plot_relative_abundance_exc_cont_aes
+# Arrange alpha_plot and beta_plot side by side
+top_row <- plot_grid(alpha_plot_graph, beta_plot_graph, ncol = 2)
+
+# Combine top_row and relative_abundance_plot vertically
+combined_plot <- plot_grid(top_row, relative_abundance_plot_graph, ncol = 1, rel_heights = c(1, 1))
+
+# Print or view the combined plot
+print(combined_plot)
+
+
+# Modify the labels size and font
+label_size <- 18
+label_font <- "bold"
+
+# Draw custom annotations for labels A, B, and C
+combined_plot_with_labels <- ggdraw() +
+  draw_plot(combined_plot, width = 1, height = 1) +
+  draw_label(label = "A", x = 0.02, y = 0.96, size = label_size, fontface = label_font) +
+  draw_label(label = "B", x = 0.52, y = 0.96, size = label_size, fontface = label_font) +
+  draw_label(label = "C", x = 0.02, y = 0.48, size = label_size, fontface = label_font)
+
+# Print or view the combined plot with custom labels
+print(combined_plot_with_labels)
+
+ggsave("D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Saved_Images\\combined_plot_updated_final_different_labels_species_removed.png", combined_plot_with_labels, width = 16, height = 12, dpi = 600)
+```
+
+#Checking the percentage of the top 5 phyla
+```{r}
+#top 5 abundant phyla for all of them
+ps <- filtered_tj_phyloseq
+
+# Convert OTU table to data frame
+otu_df <- as.data.frame(otu_table(filtered_tj_phyloseq))
+
+# Get taxa table
+taxa_df <- as.data.frame(tax_table(filtered_tj_phyloseq))
+
+# Combine OTU and taxa tables
+combined_df <- cbind(OTU_ID = rownames(otu_df), otu_df, taxa_df)
+
+# Melt the data to long format
+melted_df <- tidyr::gather(combined_df, key = "Sample", value = "Count", -OTU_ID, -Phylum)
+
+# Convert Count column to numeric
+melted_df$Count <- as.numeric(melted_df$Count)
+
+# Separate samples by "_N" and "_B"
+melted_df_N <- melted_df %>%
+  filter(grepl("_N$", Sample))
+
+melted_df_B <- melted_df %>%
+  filter(grepl("_B$", Sample))
+
+# Function to calculate top 5 phyla
+top_5_phyla_calc <- function(df) {
+  phyla_abundance <- df %>%
+    group_by(Phylum) %>%
+    summarise(total_abundance = sum(Count, na.rm = TRUE), .groups = 'drop')
+  
+  # Calculate total abundance
+  total_abundance <- sum(phyla_abundance$total_abundance, na.rm = TRUE)
+  
+  # Calculate percentage abundance for each phylum
+  phyla_abundance <- phyla_abundance %>%
+    mutate(percentage = (total_abundance / sum(total_abundance, na.rm = TRUE)) * 100)
+  
+  # Sort phyla by abundance and select top 5
+  top_5 <- phyla_abundance %>%
+    arrange(desc(total_abundance)) %>%
+    head(5)
+  
+  return(top_5)
+}
+
+# Calculate top 5 phyla for each group
+top_5_N <- top_5_phyla_calc(melted_df_N)
+top_5_B <- top_5_phyla_calc(melted_df_B)
+
+print("Top 5 most abundant phyla in _N samples:")
+print(top_5_N)
+
+print("Top 5 most abundant phyla in _B samples:")
+print(top_5_B)
+
+
+```
+
+#checking the percentages of the top 5 phyla just from the roots
+```{r}
+# Filter the phyloseq object to exclude negative control samples
+ps <- subset_samples(filtered_tj_phyloseq, !Tissue %in% "Neg")
+
+root_physeq <- subset_samples(ps, Tissue == "Root")
+
+
+
+# Convert OTU table to data frame
+otu_df <- as.data.frame(otu_table(root_physeq))
+
+# Get taxa table
+taxa_df <- as.data.frame(tax_table(root_physeq))
+
+# Combine OTU and taxa tables
+combined_df <- cbind(OTU_ID = rownames(otu_df), otu_df, taxa_df)
+
+# Melt the data to long format
+melted_df <- tidyr::gather(combined_df, key = "Sample", value = "Count", -OTU_ID, -Phylum)
+
+# Convert Count column to numeric
+melted_df$Count <- as.numeric(melted_df$Count)
+
+# Separate samples by "_N" and "_B"
+melted_df_N <- melted_df %>%
+  filter(grepl("_N$", Sample))
+
+melted_df_B <- melted_df %>%
+  filter(grepl("_B$", Sample))
+
+# Function to calculate top 5 phyla
+top_5_phyla_calc <- function(df) {
+  phyla_abundance <- df %>%
+    group_by(Phylum) %>%
+    summarise(total_abundance = sum(Count, na.rm = TRUE), .groups = 'drop')
+  
+  # Calculate total abundance
+  total_abundance <- sum(phyla_abundance$total_abundance, na.rm = TRUE)
+  
+  # Calculate percentage abundance for each phylum
+  phyla_abundance <- phyla_abundance %>%
+    mutate(percentage = (total_abundance / sum(total_abundance, na.rm = TRUE)) * 100)
+  
+  # Sort phyla by abundance and select top 5
+  top_5 <- phyla_abundance %>%
+    arrange(desc(total_abundance)) %>%
+    head(5)
+  
+  return(top_5)
+}
+
+# Calculate top 5 phyla for each group
+top_5_N <- top_5_phyla_calc(melted_df_N)
+top_5_B <- top_5_phyla_calc(melted_df_B)
+
+print("Top 5 most abundant phyla in _N samples:")
+print(top_5_N)
+
+print("Top 5 most abundant phyla in _B samples:")
+print(top_5_B)
+```
+
+#checking mpna samples from other dataset - used in the supplementary material
+```{r}
+ps_plastid <- readRDS("D:\\PhD_Bioinformatics\\1BIG_EXPERIMENT\\16S_All\\Processed_Sequences\\Phyloseq_with_plastid.RDS")
+
+ps_mPNA <- subset_samples(ps_plastid, grepl("mPNA", Sample_Number))
+
+# Extract metadata
+metadata_extract <- as.data.frame(sample_data(ps_mPNA))
+
+# Extract ASV (OTU) table
+ASV_table_extract <- as.data.frame(otu_table(ps_mPNA))
+
+# Extract classification table (taxonomy)
+classification_table_extract <- as.data.frame(tax_table(ps_mPNA))
+
+```
+
+#cehcking relative abundance of mPNA samples for chloroplast and mitochondria
+```{r}
+# Subset samples based on 'mPNA' in Sample_Number
+ps_mPNA_plastid <- subset_samples(ps_mPNA, grepl("mPNA", Sample_Number))
+
+ps_mPNA_plastid <- filter_taxa(ps_mPNA_plastid, \(x) any(x > 75), prune = TRUE)
+
+# Select top 20 most abundant taxa
+top20 <- names(sort(taxa_sums(ps_mPNA_plastid), decreasing=TRUE))
+
+# Transform counts to relative abundances
+ps_mPNA_plastid_rel <- transform_sample_counts(ps_mPNA_plastid, function(OTU) OTU/sum(OTU))
+
+# Define custom colors
+custom_colors <- c("Chloroplast" = "#66CC66",   
+                   "Mitochondria" = "#336699",  
+                   "Bacteria" = "#FF7733")
+
+# Define custom facet labels
+facet_labels <- c(Bark = "Bark", LEAF = "Leaf")
+
+# Plot relative abundance using plot_bar from phyloseq
+plot_relative_abundance <- plot_bar(ps_mPNA_plastid_rel, x = "Sample.ID", fill = "Kingdom") +
+  facet_wrap(~ Organ, scales = "free_x", labeller = labeller(Organ = facet_labels)) +
+  theme_minimal() +  # Minimal theme
+  theme(
+    axis.text.x = element_blank(),  # Remove x-axis text
+    axis.ticks.x = element_blank(),  # Remove x-axis ticks
+    panel.grid.major = element_blank(),  # Remove major gridlines
+    panel.grid.minor = element_blank(),  # Remove minor gridlines
+    panel.border = element_rect(color = NA, fill = NA),  # Add light grey border around facets
+    strip.background = element_rect(fill = "grey90", color = "grey90"),  # Customize facet label background
+    strip.text = element_text(color = "black", face = "bold"),  # Customize facet label text appearance
+    text = element_text(face = "bold", size = 16),  # Customize text appearance
+    plot.background = element_rect(fill = "white")  # Set plot background to white
+  ) +
+  labs(
+    title = NULL,
+    y = "Relative Abundance \n(%16S rRNA Gene Sequences)",
+    x = NULL
+  ) +
+  scale_fill_manual(values = custom_colors) +  # Set custom fill colors
+  scale_color_manual(values = custom_colors, guide = "none")
+
+print(plot_relative_abundance)
+
+# Save the plot with a white background
+ggsave("D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Saved_Images\\relative_abundance_no_ppPNA.png", 
+       plot_relative_abundance, width = 10, height = 4)
+
+```
+
+#QPCR SCIPT - the following is information on analysing the qPCR data
+
+```{r setup, include=FALSE}
+# Set the working directory
+setwd("D:\\PhD_Bioinformatics\\qPCR_big_experiment\\Final_qPCR_Analysis\\Final")
+```
+
+#Cleaning environnemnt
+```{r}
+rm(list = ls())
+
+```
+
+#Loading packages
+```{r}
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(tidyverse)
+```
+
+#Loading data from qPCR
+The SYBR green ("Bacteria") and Chloroplast assays were run on the same plate and the mitochondria assay was run on a separate plate
+```{r}
+
+Bac_Chloro_Data <- read.csv("D:\\PhD_Bioinformatics\\qPCR_big_experiment\\Final_qPCR_Analysis\\Final\\Bac_chloro_data.csv") #Loading Bac and Chloro data
+
+Mito_Data <- read.csv("D:\\PhD_Bioinformatics\\qPCR_big_experiment\\Final_qPCR_Analysis\\Final\\Mito_data.csv") #Loading Mito data
+```
+
+#merging all data, adding metadata and adding/removing columns for easier data manipulation
+```{r}
+#Merging data mito and chloro
+All_data <- rbind(Bac_Chloro_Data, Mito_Data)
+
+#Removing NA's in sample.name
+All_data <- All_data[complete.cases(All_data$Sample.Name), ] #This removes data points from the standard curves and no template controls as they are not needed
+
+#Subset data
+All_Data_Subset <- subset(All_data, select = c(Sample.Name, Quantity.Mean, Target.Name, Quantity.SD, Ct.SD)) #To only keep the columns we are interested in
+
+#Changing name of column from Sample.Name to Sample.Number which is more appropriate
+names(All_Data_Subset)[names(All_Data_Subset) == "Sample.Name"] <- "Sample.Number"
+
+#Creating a new column combining Sample Name and Target (I.E. Bact/Chloro/Mito)
+All_Data_Subset$Sample.Number.Target <- paste(All_Data_Subset$Sample.Number, All_Data_Subset$Target.Name, sep = "_")
+
+###
+###
+
+#Adding metadata to the qPCR results - including PNA clamps vs no PNA clamps
+PNA_Clamp_Metadata <- read.csv("D:\\PhD_Bioinformatics\\qPCR_big_experiment\\Final_qPCR_Analysis\\PNA_Clamp_With_Samples.csv")
+
+#Changing name of column from Sample.Name to Sample.Number which is more appropriate
+names(PNA_Clamp_Metadata)[names(PNA_Clamp_Metadata) == "No."] <- "Sample.Number"
+
+#Merging metadata with qPCR data 
+All_Data_Subset_Metadata <- merge(All_Data_Subset, PNA_Clamp_Metadata, by = "Sample.Number", all.x = TRUE) #This combines the metadata and qPCR data by Sample.Number
+
+###
+###
+
+#Keeping only the first letter of the clamp column
+All_Data_Subset_Metadata$PNA.Clamps <- substr(All_Data_Subset_Metadata$PNA.Clamps, 1, 1)
+
+#Combining clamp and sample name together 
+All_Data_Subset_Metadata$Sample_and_Clamp <- paste(All_Data_Subset_Metadata$Sample, All_Data_Subset_Metadata$PNA.Clamps, sep = "_")
+
+#Removing commas from columns with commas and making them numerical for ease of data maniuplation
+All_Data_Subset_Metadata$Quantity.Mean <- as.numeric(gsub(",", "", All_Data_Subset_Metadata$Quantity.Mean))
+All_Data_Subset_Metadata$Quantity.SD <- as.numeric(gsub(",", "", All_Data_Subset_Metadata$Quantity.SD))
+
+#Converting NA's to 0
+All_Data_Subset_Metadata$Quantity.Mean[is.na(All_Data_Subset_Metadata$Quantity.Mean)] <- 0
+All_Data_Subset_Metadata$Quantity.SD[is.na(All_Data_Subset_Metadata$Quantity.SD)] <- 0
+All_Data_Subset_Metadata$Ct.SD[is.na(All_Data_Subset_Metadata$Ct.SD)] <- 0
+
+#Making the Sample.Number column a factor so I can plot categorically instead of continuous
+All_Data_Subset_Metadata$Sample.Number <- factor(All_Data_Subset_Metadata$Sample.Number)
+```
+
+#removing samples with Ct.SD values greater than 0.4
+```{r}
+#removing samples with Ct.SD values greater than 0.4
+All_Data_Subset_Metadata <- subset(All_Data_Subset_Metadata, Ct.SD <= 0.4, na.rm = TRUE)
+```
+
+#Continuing with adding/removing columns for easier data manipulation
+```{r}
+# Sort the data by Quantity.Mean in descending order - so in the next step will keep duplicates with values
+All_Data_Subset_Metadata <- All_Data_Subset_Metadata[order(-All_Data_Subset_Metadata$Quantity.Mean), ]
+
+#keeping unique sample names to make it easier to plot
+df_unique <- All_Data_Subset_Metadata[!duplicated(All_Data_Subset_Metadata$Sample.Number.Target), ]
+
+#creating a new column combining target.name and clamps 
+df_unique$Target.Name.Clamps <- paste(df_unique$Target.Name, df_unique$PNA.Clamps, sep = "_")
+
+#creating a new column combining tissue and clamps 
+df_unique$Tissue.Clamps <- paste(df_unique$Tissue, df_unique$PNA.Clamps, sep = "_")
+
+#creating a new column combining tissue.clamps with target.name
+df_unique$Tissue.Clamps.Target.Name <- paste(df_unique$Tissue.Clamps, df_unique$Target.Name, sep = "_")
+
+#remove negative controls
+df_unique <- df_unique[!grepl("Neg", df_unique$Tissue), ]
+
+tissue_counts <- table(df_unique$Tissue)
+
+```
+
+#removing data which had 0 sybr value and their corresponding mito and chloroplast assays
+```{r}
+#removing data points where SYBR did not work
+#The points which did not work at all are 2,3,18,19,20,22,24,27,28
+
+df_unique_removed <- df_unique[!df_unique$Sample.Number %in% c(2,3,18,19,20,22,24,27,28,36), ]
+
+```
+
+#subsetting data with only leaf and bark and creating box plot
+```{r}
+library(ggsignif)
+# Subset to keep only "Leaf" and "Bark" rows
+subset_df_unique_removed <- subset(df_unique_removed, Tissue %in% c("Leaf", "Bark"))
+
+
+# Modify the levels of the Target.Name variable
+subset_df_unique_removed$Target.Name <- factor(subset_df_unique_removed$Target.Name,
+                                        levels = c("Bacteria", "Chloroplast", "Mitochondria"))
+
+# Create a new factor variable with the desired order and labels
+subset_df_unique_removed$Target.Name.Clamps_ordered <- factor(
+  subset_df_unique_removed$Target.Name.Clamps,
+  levels = c("Bacteria_N", "Bacteria_B", "Chloroplast_N", "Chloroplast_B", "Mitochondria_N", "Mitochondria_B"),
+  labels = c("None", "pPNA + qmPNA", "None", "pPNA + qmPNA", "None", "pPNA + qmPNA")
+)
+
+# Define custom color palette with transparency
+custom_colors <- c("None" = "#3182bd80", "pPNA + qmPNA" = "#de2d2680")
+
+# Create the plot
+qPCR_plot <- ggplot(subset_df_unique_removed, aes(x = as.factor(Target.Name.Clamps_ordered), y = Quantity.Mean, fill = Target.Name.Clamps_ordered)) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(width = 0.75), alpha = 0.8) +  # Added alpha for transparency
+  geom_jitter(width = 0.2, alpha = 0.6, color = "black", size = 2) +  
+  facet_wrap(~ Target.Name, scales = "free_x", labeller = as_labeller(c("Bacteria" = "Bacteria + Chloroplast\n + Mitochhondria", "Chloroplast" = "Chloroplast", "Mitochondria" = "Mitochondria"))) +
+  scale_fill_manual(values = custom_colors, 
+                    labels = c("None", "pPNA +\nqmPNA"),
+                    name = "PNA Clamps") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.title.y = element_text(size = 12),
+        legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10),
+        legend.position = "right",  # Move legend to the right
+        legend.box.margin = margin(5, 5, 5, 5),  # Adjust margin around legend box
+        strip.background = element_blank(),  # Remove facet background
+        strip.text = element_text(size = 12),  # Keep facet titles
+        panel.grid.minor.x = element_blank(),  # Remove vertical grid lines
+        panel.background = element_rect(fill = "grey90"),  # Add grey shaded box behind facets
+        plot.caption = element_text(hjust = 0),  # Adjust caption position
+        plot.margin = margin(0.5, 0.5, 0.5, 0.5, "cm"),  # Adjust plot margins
+        plot.background = element_rect(color = "white")) +  # Add white background
+  labs(x = NULL, y = "Absolute DNA copies / 100 µL") +  # Add caption
+  guides(fill = guide_legend(override.aes = list(shape = NA)))
+
+qPCR_plot <- qPCR_plot + geom_signif(comparisons = list(c("None", "pPNA + qmPNA"), c("None", "pPNA + qmPNA"), c("None", "pPNA + qmPNA")), 
+                map_signif_level = TRUE, textsize = 5,
+                test = "wilcox.test", exact=FALSE)
+qPCR_plot
+
+ggsave("D:\\PhD_Bioinformatics\\Big_PNA_Experiment\\R\\Tag_Jumping\\Saved_Images\\qPCR_plot1_leaf_bark.png", qPCR_plot, width = 8, height = 6, units = "in")
+
+```
+
+
+#statistics with only leaf and bark
+```{r}
+library(ggpubr)
+
+Subset_Mitochondria <- subset(subset_df_unique_removed, Target.Name == "Mitochondria")
+Subset_Bacteria <- subset(subset_df_unique_removed, Target.Name == "Bacteria")
+Subset_Chloroplast <- subset(subset_df_unique_removed, Target.Name == "Chloroplast")
+
+#calculating statistical differences via the wilcoxon rank sum test
+wilcox_result_mitochondria <- wilcox.test(Quantity.Mean ~ Target.Name.Clamps, data = Subset_Mitochondria)
+print(wilcox_result_mitochondria)
+
+wilcox_result_chloroplast <- wilcox.test(Quantity.Mean ~ Target.Name.Clamps, data = Subset_Chloroplast)
+print(wilcox_result_chloroplast)
+
+wilcox_result_bacteria <- wilcox.test(Quantity.Mean ~ Target.Name.Clamps, data = Subset_Bacteria)
+print(wilcox_result_bacteria)
+
+#working out averages and percentages
+averages <- subset_df_unique_removed %>%
+  group_by(Target.Name.Clamps) %>%
+  summarize(Average_Quantity = mean(Quantity.Mean, na.rm = TRUE))
+
+print(averages)
+
+averages <- averages %>%
+  mutate(Target.Name.Clamps = str_replace(Target.Name.Clamps, "Bacteria", "SYBR"))
+```
