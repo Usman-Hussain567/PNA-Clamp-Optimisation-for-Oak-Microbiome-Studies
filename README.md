@@ -1,4 +1,4 @@
-This respository contains the script and data for creating the figures in the paper Hussain et. al 2024 (Link here - https://assets-eu.researchsquare.com/files/rs-4991502/v1/80e0f33d-7fbc-473e-9978-bab996358a17.pdf?c=1728396794).  
+This respository contains the script and data for creating the figures in the paper Hussain et. al 2024 (Link here - https://environmentalmicrobiome.biomedcentral.com/articles/10.1186/s40793-025-00674-w).  
 
 The "PNA_Clamp_Optimisation_Script.Rmd" contians the code for running the samples through the DADA2 pipeline to create ASVs, creating graphs from sequencing data and also the code to analyse and create graphs from the qPCR data.
 
